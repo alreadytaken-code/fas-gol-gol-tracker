@@ -174,13 +174,13 @@ st.markdown(f'**Ultimo aggiornamento:** {last_update}')
 
 trend = build_trend_metrics(df)
 col1, col2, col3 = st.columns(3)
-col1.metric('GOL ultimi 5 blocchi', trend['last5'], trend['last5'] - trend['prev5'])
-col2.metric('GOL ultimi 10 blocchi', trend['last10'], trend['last10'] - trend['prev10'])
-col3.metric('% GOL ultimo blocco', f"{trend['latest_block_pct']}%")
+col1.metric('Partite GG ultimi 5 blocchi', trend['last5'], trend['last5'] - trend['prev5'])
+col2.metric('Partite GG ultimi 10 blocchi', trend['last10'], trend['last10'] - trend['prev10'])
+col3.metric('% partite GG ultimo blocco', f"{trend['latest_block_pct']}%")
 
 with st.expander('Storico risultati per blocchi orari', expanded=False):
-    storico_df = df[['orario', 'giornata', 'descrizione_avventimento', 'esito']].copy()
-    storico_df = storico_df.sort_values(['orario', 'giornata'], ascending=[False, False])
+    storico_df = df[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].copy()
+    storico_df = storico_df.sort_values(['orario', 'giornata', 'codice_avvenimento'], ascending=[False, False, False])
 
     orari_unici = storico_df['orario'].dropna().unique().tolist()
 
@@ -188,7 +188,7 @@ with st.expander('Storico risultati per blocchi orari', expanded=False):
         blocco = storico_df[storico_df['orario'] == ora].copy()
         st.markdown(f'### Blocco {ora}')
         st.dataframe(
-            blocco[['orario', 'giornata', 'descrizione_avventimento', 'esito']],
+            blocco[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']],
             use_container_width=True,
             hide_index=True,
         )
