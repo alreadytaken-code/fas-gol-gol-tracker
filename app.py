@@ -122,27 +122,23 @@ def build_blocks(df):
     return grouped[["orario", "GOL", "% sul totale"]]
 
 
-def build_stats_20(df):
+def build_header_stats(df):
     valid_df = df[df["esito"].isin(["GOL", "NO GOL"])].copy()
     if valid_df.empty:
-        return []
+        return {
+            "gol_last_20_blocks": 0,
+            "matches_last_20_blocks": 0,
+            "blocks_count": 0,
+        }
 
-    stats = []
-    total_rows = len(valid_df)
+    recent_blocks = valid_df["orario"].dropna().drop_duplicates().tolist()[:20]
+    filtered = valid_df[valid_df["orario"].isin(recent_blocks)].copy()
 
-    for start in range(0, total_rows, 20):
-        chunk = valid_df.iloc[start:start + 20].copy()
-        gol_count = int((chunk["esito"] == "GOL").sum())
-        no_gol_count = int((chunk["esito"] == "NO GOL").sum())
-
-        label = f"Partite {start + 1}-{start + len(chunk)}"
-        stats.append({
-            "label": label,
-            "gol": gol_count,
-            "no_gol": no_gol_count,
-        })
-
-    return stats
+    return {
+        "gol_last_20_blocks": int((filtered["esito"] == "GOL").sum()),
+        "matches_last_20_blocks": int(len(filtered)),
+        "blocks_count": len(recent_blocks),
+    }
 
 
 if st.button("Aggiorna risultati", type="primary"):
@@ -166,34 +162,29 @@ df = df.sort_values(["orario", "timestamp"], ascending=False)
 
 st.markdown(f"**Ultimo aggiornamento:** {last_update}")
 
-st.subheader("Statistiche ogni 20 partite")
-stats_20 = build_stats_20(df)
+header_stats = build_header_stats(df)
+col1, col2, col3 = st.columns(3)
+col1.metric("GOL negli ultimi 20 blocchi orari", header_stats["gol_last_20_blocks"])
+col2.metric("Partite negli ultimi 20 blocchi", header_stats["matches_last_20_blocks"])
+col3.metric("Blocchi orari considerati", header_stats["blocks_count"])
 
-if stats_20:
-    visible_stats = stats_20[:4]
-    cols = st.columns(len(visible_stats))
-    for i, stat in enumerate(visible_stats):
-        cols[i].metric(stat["label"], f"GOL {stat['gol']}", f"NO GOL {stat['no_gol']}")
-else:
-    st.info("Nessuna statistica disponibile.")
+with st.expander("Storico risultati per blocchi orari", expanded=False):
+    storico_df = df[["orario", "giornata", "descrizione_avventimento", "esito"]].copy()
+    storico_df = storico_df.sort_values(["orario", "giornata"], ascending=[False, False])
 
-st.subheader("Storico risultati")
-storico_df = df[["orario", "giornata", "descrizione_avventimento", "esito"]].copy()
-storico_df = storico_df.sort_values(["orario", "giornata"], ascending=[False, False])
+    orari_unici = storico_df["orario"].dropna().unique().tolist()
 
-orari_unici = storico_df["orario"].dropna().unique().tolist()
+    for i, ora in enumerate(orari_unici):
+        blocco = storico_df[storico_df["orario"] == ora].copy()
+        st.markdown(f"### Blocco {ora}")
+        st.dataframe(
+            blocco[["orario", "giornata", "descrizione_avventimento", "esito"]],
+            use_container_width=True,
+            hide_index=True,
+        )
 
-for i, ora in enumerate(orari_unici):
-    blocco = storico_df[storico_df["orario"] == ora].copy()
-    st.markdown(f"### Blocco {ora}")
-    st.dataframe(
-        blocco[["orario", "giornata", "descrizione_avventimento", "esito"]],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    if i < len(orari_unici) - 1:
-        st.divider()
+        if i < len(orari_unici) - 1:
+            st.divider()
 
 st.subheader("Blocchi orari")
 blocks_df = build_blocks(df)
@@ -205,5 +196,5 @@ if not blocks_df.empty:
     st.bar_chart(bar_df, height=320)
 
     st.subheader("Trend percentuale")
-    trend_df = blocks_df.set_index("orario")[["% sul totale"]]
+    trend_df = blocks_df.set_index("orario")[['% sul totale']]
     st.line_chart(trend_df, height=280)
