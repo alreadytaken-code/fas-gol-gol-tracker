@@ -2,12 +2,11 @@ import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
-import re
 
-st.set_page_config(page_title="FAS League GOL GOL Tracker", layout="wide")
+st.set_page_config(page_title="FAS League Tracker", layout="wide")
 
-st.title("FAS League GOL GOL Tracker")
-st.caption("Dashboard manuale: clicca il pulsante per recuperare risultati, partite GOL GOL e trend per blocchi orari.")
+st.title("FAS League Tracker")
+st.caption("Archivio risultati Sisal con focus GOL / NO GOL")
 
 
 def infer_gol_gol(result_list):
@@ -17,22 +16,15 @@ def infer_gol_gol(result_list):
 
         if "goal/no goal" in market or "gol/no gol" in market:
             if "+ goal" in result or result.strip() in ["goal", "gol", "gg"]:
-                return "SI"
+                return "GOL"
             if "+ no goal" in result or "+ no gol" in result or result.strip() in ["no goal", "no gol", "nogol", "ng"]:
-                return "NO"
+                return "NO GOL"
     return "N/D"
-
-
-def clean_team_sigla(value):
-    value = str(value or "").strip().upper()
-    value = value.replace("–", "-").replace("—", "-")
-    value = re.sub(r"[^A-Z]", "", value)
-    return value
 
 
 def get_event_description(ev):
     candidates = [
-        ev.get("descrizioneAvventimento"),  # campo corretto trovato nel JSON
+        ev.get("descrizioneAvventimento"),
         ev.get("descrizioneAvvenimento"),
         ev.get("descrizioneEvento"),
         ev.get("evento"),
@@ -45,31 +37,8 @@ def get_event_description(ev):
     for value in candidates:
         value = str(value or "").strip()
         if value:
-            return value
-
+            return value.replace(" ", "")
     return ""
-
-
-def parse_match_name(desc):
-    text = str(desc or "").strip()
-    text = text.replace("–", "-").replace("—", "-")
-
-    if " - " in text:
-        left, right = text.split(" - ", 1)
-    elif "-" in text:
-        left, right = text.split("-", 1)
-    else:
-        return "CASA", "TRASFERTA", text
-
-    home_team = clean_team_sigla(left)
-    away_team = clean_team_sigla(right)
-
-    if not home_team:
-        home_team = "CASA"
-    if not away_team:
-        away_team = "TRASFERTA"
-
-    return home_team, away_team, text
 
 
 def fetch_matches():
@@ -118,28 +87,15 @@ def fetch_matches():
                     if not isinstance(result_list, list):
                         result_list = []
 
-                    home_team, away_team, raw_desc = parse_match_name(desc)
-                    gol_gol = infer_gol_gol(result_list)
-
-                    raw_markets = []
-                    for rr in result_list[:15]:
-                        market = rr.get("descrizioneScommessa") or rr.get("modelloScommessa") or ""
-                        result = rr.get("risultato") or rr.get("descrizioneEsito") or ""
-                        raw_markets.append(f"{market}: {result}")
+                    esito = infer_gol_gol(result_list)
 
                     matches.append({
                         "match_id": f"{date_str}-{codice_palinsesto}-{codice_avvenimento}",
-                        "data": date_str,
-                        "orario": data_ora,
                         "timestamp": f"{date_str} {data_ora}",
+                        "orario": data_ora,
                         "giornata": giornata,
-                        "home_team": home_team,
-                        "away_team": away_team,
-                        "match_name": f"{home_team}-{away_team}",
-                        "descrizione_avventimento": raw_desc,
-                        "gol_gol": gol_gol,
-                        "markets_count": len(result_list),
-                        "raw_markets": " | ".join(raw_markets)
+                        "descrizione_avventimento": desc,
+                        "esito": esito,
                     })
 
     dedup = {}
@@ -151,52 +107,55 @@ def fetch_matches():
     return results
 
 
-def build_stats(df, window):
+def build_blocks(df):
     if df.empty:
-        return {"count": 0, "gg": 0, "pct": 0.0}
-    wdf = df.head(window).copy()
-    gg = int((wdf["gol_gol"] == "SI").sum())
-    return {
-        "count": len(wdf),
-        "gg": gg,
-        "pct": round((gg / len(wdf)) * 100, 2)
-    }
+        return pd.DataFrame(columns=["orario", "GOL", "% sul totale"])
 
+    grouped = df.groupby("orario").agg(
+        totale=("esito", "count"),
+        GOL=("esito", lambda x: (x == "GOL").sum())
+    ).reset_index()
 
-def build_time_blocks(df):
-    if df.empty:
-        return pd.DataFrame(columns=["orario", "totale_partite", "gol_gol_si", "gol_gol_no", "non_classificate", "perc_gol_gol"])
-
-    grouped = (
-        df.groupby(["orario", "gol_gol"])
-        .size()
-        .unstack(fill_value=0)
-        .reset_index()
-    )
-
-    for col in ["SI", "NO", "N/D"]:
-        if col not in grouped.columns:
-            grouped[col] = 0
-
-    grouped["totale_partite"] = grouped["SI"] + grouped["NO"] + grouped["N/D"]
-    grouped["gol_gol_si"] = grouped["SI"]
-    grouped["gol_gol_no"] = grouped["NO"]
-    grouped["non_classificate"] = grouped["N/D"]
-    grouped["perc_gol_gol"] = ((grouped["gol_gol_si"] / grouped["totale_partite"]) * 100).round(2)
+    grouped["% sul totale"] = ((grouped["GOL"] / grouped["totale"]) * 100).round(2)
     grouped = grouped.sort_values("orario", ascending=False)
 
-    return grouped[["orario", "totale_partite", "gol_gol_si", "gol_gol_no", "non_classificate", "perc_gol_gol"]]
+    return grouped[["orario", "GOL", "% sul totale"]]
+
+
+def build_stats_20(df):
+    valid_df = df[df["esito"].isin(["GOL", "NO GOL"])].copy()
+    if valid_df.empty:
+        return []
+
+    stats = []
+    total_rows = len(valid_df)
+
+    for start in range(0, total_rows, 20):
+        chunk = valid_df.iloc[start:start + 20].copy()
+        gol_count = int((chunk["esito"] == "GOL").sum())
+        no_gol_count = int((chunk["esito"] == "NO GOL").sum())
+
+        label = f"Partite {start + 1}-{start + len(chunk)}"
+        stats.append({
+            "label": label,
+            "gol": gol_count,
+            "no_gol": no_gol_count,
+        })
+
+    return stats
 
 
 if st.button("Aggiorna risultati", type="primary"):
     try:
         matches = fetch_matches()
         st.session_state["matches"] = matches
+        st.session_state["last_update"] = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
         st.success(f"Partite trovate: {len(matches)}")
     except Exception as e:
         st.error(f"Errore API: {e}")
 
 matches = st.session_state.get("matches", [])
+last_update = st.session_state.get("last_update", "-")
 
 if not matches:
     st.info("Premi 'Aggiorna risultati' per caricare i dati.")
@@ -205,55 +164,46 @@ if not matches:
 df = pd.DataFrame(matches)
 df = df.sort_values(["orario", "timestamp"], ascending=False)
 
-valid_df = df[df["gol_gol"].isin(["SI", "NO"])].copy()
-stats10 = build_stats(valid_df, 10)
-stats25 = build_stats(valid_df, 25)
-stats50 = build_stats(valid_df, 50)
+st.markdown(f"**Ultimo aggiornamento:** {last_update}")
 
-c1, c2, c3 = st.columns(3)
-c1.metric("GOL GOL ultime 10", f"{stats10['pct']}%", f"{stats10['gg']}/{stats10['count']}")
-c2.metric("GOL GOL ultime 25", f"{stats25['pct']}%", f"{stats25['gg']}/{stats25['count']}")
-c3.metric("GOL GOL ultime 50", f"{stats50['pct']}%", f"{stats50['gg']}/{stats50['count']}")
+st.subheader("Statistiche ogni 20 partite")
+stats_20 = build_stats_20(df)
 
-time_blocks = build_time_blocks(df)
+if stats_20:
+    visible_stats = stats_20[:4]
+    cols = st.columns(len(visible_stats))
+    for i, stat in enumerate(visible_stats):
+        cols[i].metric(stat["label"], f"GOL {stat['gol']}", f"NO GOL {stat['no_gol']}")
+else:
+    st.info("Nessuna statistica disponibile.")
+
+st.subheader("Storico risultati")
+storico_df = df[["orario", "giornata", "descrizione_avventimento", "esito"]].copy()
+storico_df = storico_df.sort_values(["orario", "giornata"], ascending=[False, False])
+
+orari_unici = storico_df["orario"].dropna().unique().tolist()
+
+for i, ora in enumerate(orari_unici):
+    blocco = storico_df[storico_df["orario"] == ora].copy()
+    st.markdown(f"### Blocco {ora}")
+    st.dataframe(
+        blocco[["orario", "giornata", "descrizione_avventimento", "esito"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    if i < len(orari_unici) - 1:
+        st.divider()
 
 st.subheader("Blocchi orari")
-st.dataframe(time_blocks, use_container_width=True, hide_index=True)
+blocks_df = build_blocks(df)
+st.dataframe(blocks_df, use_container_width=True, hide_index=True)
 
-if not time_blocks.empty:
-    st.subheader("Grafico per blocchi orari")
-    chart_blocks = time_blocks.set_index("orario")[["gol_gol_si", "gol_gol_no", "non_classificate"]]
-    st.bar_chart(chart_blocks, height=320)
+if not blocks_df.empty:
+    st.subheader("Grafico blocchi orari")
+    bar_df = blocks_df.set_index("orario")[["GOL"]]
+    st.bar_chart(bar_df, height=320)
 
-    st.subheader("Trend percentuale GOL GOL per orario")
-    trend_blocks = time_blocks.set_index("orario")[["perc_gol_gol"]]
-    st.line_chart(trend_blocks, height=280)
-
-if not valid_df.empty:
-    chart_df = valid_df.copy()
-    chart_df = chart_df.iloc[::-1].reset_index(drop=True)
-    chart_df["gol_gol_num"] = (chart_df["gol_gol"] == "SI").astype(int)
-    chart_df["media_mobile_10"] = chart_df["gol_gol_num"].rolling(10, min_periods=1).mean() * 100
-    st.subheader("Trend GOL GOL partita per partita")
-    st.line_chart(chart_df[["gol_gol_num", "media_mobile_10"]], height=300)
-
-st.subheader("Partite uscite GOL GOL (SI)")
-st.dataframe(
-    df[df["gol_gol"] == "SI"][["timestamp", "orario", "match_name", "home_team", "away_team", "raw_markets"]],
-    use_container_width=True,
-    hide_index=True
-)
-
-st.subheader("Partite uscite NO GOL GOL (NO)")
-st.dataframe(
-    df[df["gol_gol"] == "NO"][["timestamp", "orario", "match_name", "home_team", "away_team", "raw_markets"]],
-    use_container_width=True,
-    hide_index=True
-)
-
-st.subheader("Storico completo")
-st.dataframe(
-    df[["timestamp", "orario", "giornata", "match_name", "home_team", "away_team", "descrizione_avventimento", "gol_gol", "markets_count", "raw_markets"]],
-    use_container_width=True,
-    hide_index=True
-)
+    st.subheader("Trend percentuale")
+    trend_df = blocks_df.set_index("orario")[["% sul totale"]]
+    st.line_chart(trend_df, height=280)
