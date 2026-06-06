@@ -1,58 +1,178 @@
 import streamlit as st
 import requests
-from datetime import datetime
 import pandas as pd
-import json
+from datetime import datetime
 
-st.set_page_config(page_title="FAS League Debug", layout="wide")
+st.set_page_config(page_title="FAS League GOL GOL Tracker", layout="wide")
 
-st.title("FAS League Debug")
-st.write("Test lettura API Sisal")
+st.title("FAS League GOL GOL Tracker")
+st.caption("Dashboard manuale: clicca il pulsante per recuperare risultati, partite GOL GOL e trend.")
 
-date_str = datetime.now().strftime("%d-%m-%Y")
-api_url = f"https://betting.sisal.it/api/vrol-api/vrol/archivio/getArchivioGareCampionato/1/3/6/{date_str}"
 
-st.write("API URL:", api_url)
+def infer_gol_gol(result_list):
+    for rr in result_list:
+        market = str(rr.get("descrizioneScommessa") or rr.get("modelloScommessa") or "").lower()
+        result = str(rr.get("risultato") or rr.get("descrizioneEsito") or "").lower()
 
-if st.button("Leggi API"):
+        if "gol" in market:
+            if result in ["gol", "goal", "gg"]:
+                return "SI"
+            if result in ["no gol", "nogol", "ng"]:
+                return "NO"
+
+    return "N/D"
+
+
+def fetch_matches():
+    date_str = datetime.now().strftime("%d-%m-%Y")
+    api_url = f"https://betting.sisal.it/api/vrol-api/vrol/archivio/getArchivioGareCampionato/1/3/6/{date_str}"
+
+    r = requests.get(
+        api_url,
+        timeout=30,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "Referer": "https://www.sisal.it/",
+        },
+    )
+    r.raise_for_status()
+    data = r.json()
+
+    matches = []
+
+    if not isinstance(data, list):
+        return matches
+
+    for giornata_block in data:
+        risultato_map = giornata_block.get("risultatoModelloScommessaCampionatoMap", {})
+        if not isinstance(risultato_map, dict):
+            continue
+
+        for key, model_list in risultato_map.items():
+            if not isinstance(model_list, list):
+                continue
+
+            for model in model_list:
+                eventi = model.get("eventiScommessaList", [])
+                if not isinstance(eventi, list):
+                    continue
+
+                for ev in eventi:
+                    desc = str(ev.get("descrizioneAvvenimento", "")).strip()
+                    data_ora = str(ev.get("dataOra", "")).strip()
+                    codice_palinsesto = str(ev.get("codicePalinsesto", "")).strip()
+                    codice_avvenimento = str(ev.get("codiceAvvenimento", "")).strip()
+
+                    home_team = "Casa"
+                    away_team = "Trasferta"
+                    if " - " in desc:
+                        parts = desc.split(" - ", 1)
+                        home_team = parts[0].strip()
+                        away_team = parts[1].strip()
+
+                    result_list = ev.get("risultatoScommessaUfficialeList", [])
+                    if not isinstance(result_list, list):
+                        result_list = []
+
+                    gol_gol = infer_gol_gol(result_list)
+
+                    raw_markets = []
+                    for rr in result_list[:15]:
+                        market = rr.get("descrizioneScommessa") or rr.get("modelloScommessa") or ""
+                        result = rr.get("risultato") or rr.get("descrizioneEsito") or ""
+                        raw_markets.append(f"{market}: {result}")
+
+                    matches.append({
+                        "match_id": f"{date_str}-{codice_palinsesto}-{codice_avvenimento}",
+                        "timestamp": f"{date_str} {data_ora}",
+                        "home_team": home_team,
+                        "away_team": away_team,
+                        "gol_gol": gol_gol,
+                        "markets_count": len(result_list),
+                        "raw_markets": " | ".join(raw_markets)
+                    })
+
+    # dedup
+    dedup = {}
+    for m in matches:
+        dedup[m["match_id"]] = m
+
+    results = list(dedup.values())
+    results.sort(key=lambda x: x["timestamp"], reverse=True)
+    return results
+
+
+def build_stats(df, window):
+    if df.empty:
+        return {"count": 0, "gg": 0, "pct": 0.0}
+    wdf = df.head(window).copy()
+    gg = int((wdf["gol_gol"] == "SI").sum())
+    return {
+        "count": len(wdf),
+        "gg": gg,
+        "pct": round((gg / len(wdf)) * 100, 2)
+    }
+
+
+if st.button("Aggiorna risultati", type="primary"):
     try:
-        r = requests.get(
-            api_url,
-            timeout=30,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json",
-                "Referer": "https://www.sisal.it/",
-            },
-        )
-        r.raise_for_status()
-        data = r.json()
-
-        st.success("API letta correttamente")
-
-        st.subheader("Info root JSON")
-        st.write("Tipo root:", type(data).__name__)
-
-        if isinstance(data, dict):
-            st.write("Chiavi root:", list(data.keys())[:50])
-
-            # mostra anteprima compatta
-            preview = {}
-            for k, v in list(data.items())[:10]:
-                if isinstance(v, (list, dict)):
-                    preview[k] = f"{type(v).__name__} ({len(v) if hasattr(v, '__len__') else 'n/a'})"
-                else:
-                    preview[k] = v
-            st.json(preview)
-
-        elif isinstance(data, list):
-            st.write("Lunghezza lista root:", len(data))
-            if data:
-                st.subheader("Primo elemento")
-                st.json(data[0])
-
-        st.subheader("JSON grezzo (prime 3000 battute)")
-        st.code(json.dumps(data, ensure_ascii=False)[:3000])
-
+        matches = fetch_matches()
+        st.session_state["matches"] = matches
+        st.success(f"Partite trovate: {len(matches)}")
     except Exception as e:
-        st.error(f"Errore: {e}")
+        st.error(f"Errore API: {e}")
+
+matches = st.session_state.get("matches", [])
+
+if not matches:
+    st.info("Premi 'Aggiorna risultati' per caricare i dati.")
+    st.stop()
+
+df = pd.DataFrame(matches)
+
+valid_df = df[df["gol_gol"].isin(["SI", "NO"])].copy()
+stats10 = build_stats(valid_df, 10)
+stats25 = build_stats(valid_df, 25)
+stats50 = build_stats(valid_df, 50)
+
+c1, c2, c3 = st.columns(3)
+c1.metric("GOL GOL ultime 10", f"{stats10['pct']}%", f"{stats10['gg']}/{stats10['count']}")
+c2.metric("GOL GOL ultime 25", f"{stats25['pct']}%", f"{stats25['gg']}/{stats25['count']}")
+c3.metric("GOL GOL ultime 50", f"{stats50['pct']}%", f"{stats50['gg']}/{stats50['count']}")
+
+if not valid_df.empty:
+    chart_df = valid_df.copy()
+    chart_df = chart_df.iloc[::-1].reset_index(drop=True)
+    chart_df["gol_gol_num"] = (chart_df["gol_gol"] == "SI").astype(int)
+    chart_df["media_mobile_10"] = chart_df["gol_gol_num"].rolling(10, min_periods=1).mean() * 100
+    st.subheader("Trend GOL GOL")
+    st.line_chart(chart_df[["gol_gol_num", "media_mobile_10"]], height=300)
+
+st.subheader("Partite uscite GOL GOL (SI)")
+st.dataframe(
+    df[df["gol_gol"] == "SI"][["timestamp", "home_team", "away_team", "gol_gol", "raw_markets"]],
+    use_container_width=True,
+    hide_index=True
+)
+
+st.subheader("Partite uscite NO GOL GOL (NO)")
+st.dataframe(
+    df[df["gol_gol"] == "NO"][["timestamp", "home_team", "away_team", "gol_gol", "raw_markets"]],
+    use_container_width=True,
+    hide_index=True
+)
+
+st.subheader("Partite non ancora classificate (N/D)")
+st.dataframe(
+    df[df["gol_gol"] == "N/D"][["timestamp", "home_team", "away_team", "gol_gol", "raw_markets"]],
+    use_container_width=True,
+    hide_index=True
+)
+
+st.subheader("Storico completo")
+st.dataframe(
+    df[["timestamp", "home_team", "away_team", "gol_gol", "markets_count", "raw_markets"]],
+    use_container_width=True,
+    hide_index=True
+)
