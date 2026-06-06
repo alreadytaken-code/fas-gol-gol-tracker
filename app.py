@@ -1,13 +1,12 @@
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 import pandas as pd
 import requests
 import streamlit as st
 
-ARCHIVE_URL = "https://www.sisal.it/virtual-race/archivio-gare"
 DATA_FILE = Path("fas_results_store.json")
 
 st.set_page_config(page_title="FAS League GOL GOL Tracker", layout="wide")
@@ -23,27 +22,14 @@ def load_store() -> Dict:
 
 
 def save_store(store: Dict) -> None:
-    DATA_FILE.write_text(
-        json.dumps(store, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    DATA_FILE.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def is_gol_gol(home_goals: int, away_goals: int) -> bool:
-    return home_goals > 0 and away_goals > 0
-
-
-def add_flags(matches: List[Dict]) -> List[Dict]:
-    enriched = []
-    for m in matches:
-        hg = int(m.get("home_goals", 0))
-        ag = int(m.get("away_goals", 0))
-        gg = is_gol_gol(hg, ag)
-        row = dict(m)
-        row["gol_gol"] = "SI" if gg else "NO"
-        row["tot_goals"] = hg + ag
-        enriched.append(row)
-    return enriched
+def safe_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return default
 
 
 def build_stats(df: pd.DataFrame, window: int) -> Dict:
@@ -67,80 +53,95 @@ def trend_label(current_pct: float, baseline_pct: float) -> str:
     return "Stabile (0%)"
 
 
-def parse_score(text: str) -> Optional[tuple]:
-    text = text.replace("–", "-").replace("—", "-").strip()
-    if "-" not in text:
-        return None
-    left, right = [x.strip() for x in text.split("-", 1)]
-    if left.isdigit() and right.isdigit():
-        return int(left), int(right)
-    return None
+def infer_gol_gol(result_details: List[Dict]) -> str:
+    for item in result_details:
+        market = str(item.get("market", "")).lower()
+        result = str(item.get("result", "")).lower()
+        if "gol" in market and "no gol" not in market:
+            if result in {"gol", "goal", "gg"}:
+                return "SI"
+            if result in {"no gol", "nogol", "ng"}:
+                return "NO"
+    return "N/D"
 
 
 def fetch_results_from_sisal() -> List[Dict]:
+    date_str = datetime.now().strftime("%d-%m-%Y")
+    api_url = (
+        "https://betting.sisal.it/api/vrol-api/vrol/archivio/"
+        f"getArchivioGareCampionato/1/3/6/{date_str}"
+    )
+
     r = requests.get(
-        ARCHIVE_URL,
-        timeout=60,
-        headers={"User-Agent": "Mozilla/5.0"},
+        api_url,
+        timeout=30,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "Referer": "https://www.sisal.it/",
+        },
     )
     r.raise_for_status()
-    html = r.text
+    data = r.json()
 
-    tables = pd.read_html(html)
     matches = []
 
-    for table in tables:
-        cols = [str(c).strip().lower() for c in table.columns]
-        joined = " ".join(cols)
-        if not any(k in joined for k in ["risult", "squadr", "team", "gara", "esito"]):
-            continue
+    def walk(obj):
+        if isinstance(obj, dict):
+            if "descrizioneAvvenimento" in obj:
+                desc = str(obj.get("descrizioneAvvenimento", "")).strip()
+                data_ora = str(obj.get("dataOra", "")).strip()
+                palinsesto = str(obj.get("codicePalinsesto", "")).strip()
+                avv = str(obj.get("codiceAvvenimento", "")).strip()
 
-        for _, row in table.iterrows():
-            row_dict = {
-                str(k).strip().lower(): str(v).strip()
-                for k, v in row.to_dict().items()
-            }
-            raw = " | ".join(row_dict.values())
+                home_team = "Casa"
+                away_team = "Trasferta"
+                if " - " in desc:
+                    parts = desc.split(" - ", 1)
+                    home_team = parts[0].strip() or "Casa"
+                    away_team = parts[1].strip() or "Trasferta"
 
-            score = None
-            for val in row_dict.values():
-                score = parse_score(val)
-                if score:
-                    break
-            if not score:
-                continue
+                official_results = obj.get("risultatoScommessaUfficialeList", []) or []
+                result_labels = []
+                for rr in official_results:
+                    label = rr.get("risultato") or rr.get("descrizioneEsito") or ""
+                    market = rr.get("descrizioneScommessa") or rr.get("modelloScommessa") or ""
+                    quote = rr.get("quoteComb") or ""
+                    result_labels.append(
+                        {
+                            "market": str(market),
+                            "result": str(label),
+                            "quote": str(quote),
+                        }
+                    )
 
-            home_team = (
-                row_dict.get("squadra casa")
-                or row_dict.get("home")
-                or row_dict.get("team 1")
-                or row_dict.get("gara")
-                or "Casa"
-            )
-            away_team = (
-                row_dict.get("squadra trasferta")
-                or row_dict.get("away")
-                or row_dict.get("team 2")
-                or "Trasferta"
-            )
-            event_time = (
-                row_dict.get("data")
-                or row_dict.get("giornata")
-                or row_dict.get("orario")
-                or datetime.now().isoformat(timespec="minutes")
-            )
+                gol_gol = infer_gol_gol(result_labels)
 
-            matches.append(
-                {
-                    "match_id": f"{event_time}-{home_team}-{away_team}-{score[0]}-{score[1]}",
-                    "timestamp": event_time,
-                    "home_team": home_team,
-                    "away_team": away_team,
-                    "home_goals": score[0],
-                    "away_goals": score[1],
-                    "raw_row": raw,
-                }
-            )
+                matches.append(
+                    {
+                        "match_id": f"{date_str}-{palinsesto}-{avv}",
+                        "timestamp": f"{date_str} {data_ora}",
+                        "home_team": home_team,
+                        "away_team": away_team,
+                        "home_goals": 0,
+                        "away_goals": 0,
+                        "tot_goals": 0,
+                        "gol_gol": gol_gol,
+                        "markets_count": len(result_labels),
+                        "raw_markets": " | ".join(
+                            [f"{x['market']}: {x['result']}" for x in result_labels[:12]]
+                        ),
+                        "raw_row": json.dumps(obj, ensure_ascii=False),
+                    }
+                )
+
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(data)
 
     dedup = {m["match_id"]: m for m in matches}
     results = list(dedup.values())
@@ -149,9 +150,7 @@ def fetch_results_from_sisal() -> List[Dict]:
 
 
 st.title("FAS League GOL GOL Tracker")
-st.caption(
-    "Dashboard manuale: clicca il pulsante per recuperare risultati, partite GOL GOL e trend."
-)
+st.caption("Dashboard manuale: clicca il pulsante per recuperare risultati, partite GOL GOL e trend.")
 
 store = load_store()
 
@@ -168,15 +167,13 @@ if refresh:
             store["matches"] = fresh_matches
             store["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             save_store(store)
-            st.success(f"Recuperate {len(fresh_matches)} partite.")
+            st.success(f"Recuperate {len(fresh_matches)} partite dall'API Sisal.")
         else:
-            st.warning(
-                "Nessuna partita trovata. Potrebbe servire adattare il parser alla struttura reale della pagina Sisal."
-            )
+            st.warning("Nessuna partita trovata nell'API Sisal per oggi.")
     except Exception as e:
-        st.error(f"Errore nel recupero dati: {e}")
+        st.error(f"Errore nel recupero dati API: {e}")
 
-matches = add_flags(store.get("matches", []))
+matches = store.get("matches", [])
 df = pd.DataFrame(matches)
 
 if df.empty:
@@ -186,9 +183,9 @@ if df.empty:
 if "timestamp" in df.columns:
     df = df.sort_values(by="timestamp", ascending=False)
 
-stats10 = build_stats(df, 10)
-stats25 = build_stats(df, 25)
-stats50 = build_stats(df, 50)
+stats10 = build_stats(df[df["gol_gol"].isin(["SI", "NO"])], 10)
+stats25 = build_stats(df[df["gol_gol"].isin(["SI", "NO"])], 25)
+stats50 = build_stats(df[df["gol_gol"].isin(["SI", "NO"])], 50)
 baseline_pct = stats50["pct"] if stats50["count"] else stats10["pct"]
 trend = trend_label(stats10["pct"], baseline_pct)
 
@@ -198,46 +195,37 @@ k2.metric("GOL GOL ultime 25", f"{stats25['pct']}%", f"{stats25['gg']}/{stats25[
 k3.metric("GOL GOL ultime 50", f"{stats50['pct']}%", f"{stats50['gg']}/{stats50['count']}")
 k4.metric("Trend", trend)
 
-chart_df = df.copy()
-chart_df["gol_gol_num"] = (chart_df["gol_gol"] == "SI").astype(int)
-chart_df = chart_df.iloc[::-1].reset_index(drop=True)
-chart_df["media_mobile_10"] = chart_df["gol_gol_num"].rolling(10, min_periods=1).mean() * 100
-
-st.subheader("Trend GOL GOL")
-st.line_chart(chart_df[["gol_gol_num", "media_mobile_10"]], height=280)
+chart_df = df[df["gol_gol"].isin(["SI", "NO"])].copy()
+if not chart_df.empty:
+    chart_df["gol_gol_num"] = (chart_df["gol_gol"] == "SI").astype(int)
+    chart_df = chart_df.iloc[::-1].reset_index(drop=True)
+    chart_df["media_mobile_10"] = chart_df["gol_gol_num"].rolling(10, min_periods=1).mean() * 100
+    st.subheader("Trend GOL GOL")
+    st.line_chart(chart_df[["gol_gol_num", "media_mobile_10"]], height=280)
+else:
+    st.warning("L'API è stata letta, ma non ho ancora individuato con certezza il mercato GOL/NO GOL per calcolare il trend.")
 
 st.subheader("Partite uscite GOL GOL (SI)")
-gg_df = df[df["gol_gol"] == "SI"][
-    ["timestamp", "home_team", "away_team", "home_goals", "away_goals", "gol_gol"]
-]
+gg_df = df[df["gol_gol"] == "SI"][["timestamp", "home_team", "away_team", "gol_gol", "markets_count", "raw_markets"]]
 st.dataframe(gg_df, use_container_width=True, hide_index=True)
 
 st.subheader("Partite uscite NO GOL GOL (NO)")
-no_df = df[df["gol_gol"] == "NO"][
-    ["timestamp", "home_team", "away_team", "home_goals", "away_goals", "gol_gol"]
-]
+no_df = df[df["gol_gol"] == "NO"][["timestamp", "home_team", "away_team", "gol_gol", "markets_count", "raw_markets"]]
 st.dataframe(no_df, use_container_width=True, hide_index=True)
 
+st.subheader("Partite con esito GOL GOL non ancora identificato")
+nd_df = df[df["gol_gol"] == "N/D"][["timestamp", "home_team", "away_team", "gol_gol", "markets_count", "raw_markets"]]
+st.dataframe(nd_df, use_container_width=True, hide_index=True)
+
 st.subheader("Storico completo")
-view_df = df[
-    [
-        "timestamp",
-        "home_team",
-        "away_team",
-        "home_goals",
-        "away_goals",
-        "tot_goals",
-        "gol_gol",
-        "raw_row",
-    ]
-]
+view_df = df[["timestamp", "home_team", "away_team", "gol_gol", "markets_count", "raw_markets"]]
 st.dataframe(view_df, use_container_width=True, hide_index=True)
 
 with st.expander("Note tecniche"):
     st.markdown(
         """
-        - Il parser HTML è generico e potrebbe richiedere un adattamento alla struttura reale di Sisal.
-        - Se la pagina carica i risultati via JavaScript/XHR, conviene intercettare l'endpoint JSON dal browser e sostituire `fetch_results_from_sisal()`.
-        - La colonna `gol_gol` mostra chiaramente quali partite sono uscite SI e quali NO.
+        - Questa versione usa direttamente l'endpoint JSON Sisal individuato dal browser, invece della pagina HTML che andava in timeout.
+        - Il campo GOL GOL è dedotto cercando mercati/esiti che contengono "gol" nella risposta JSON.
+        - Se alcune partite risultano N/D, dobbiamo affinare la mappatura guardando altri esempi della response API.
         """
     )
