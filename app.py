@@ -9,6 +9,41 @@ st.set_page_config(page_title="FAS League GOL GOL Tracker", layout="wide")
 st.title("FAS League GOL GOL Tracker")
 st.caption("Dashboard manuale: clicca il pulsante per recuperare risultati, partite GOL GOL e trend per blocchi orari.")
 
+TEAM_MAP = {
+    "JUV": "Juve",
+    "UDI": "Udinese",
+    "INT": "Inter",
+    "ROM": "Roma",
+    "NAP": "Napoli",
+    "VER": "Verona",
+    "ATA": "Atalanta",
+    "GEN": "Genoa",
+    "LAZ": "Lazio",
+    "MIL": "Milan",
+    "SAM": "Sampdoria",
+    "FIO": "Fiorentina",
+    "TOR": "Torino",
+    "BOL": "Bologna",
+    "PAR": "Parma",
+    "SAS": "Sassuolo",
+    "EMP": "Empoli",
+    "MON": "Monza",
+    "LEC": "Lecce",
+    "SAL": "Salernitana",
+    "CAG": "Cagliari",
+    "PAL": "Palermo",
+    "PIS": "Pisa",
+    "COM": "Como",
+    "CRE": "Cremonese",
+    "SPE": "Spezia",
+    "BEN": "Benevento",
+    "ASC": "Ascoli",
+    "BAR": "Bari",
+    "REG": "Reggina",
+    "PER": "Perugia",
+    "CAT": "Catanzaro",
+}
+
 
 def infer_gol_gol(result_list):
     for rr in result_list:
@@ -24,70 +59,42 @@ def infer_gol_gol(result_list):
     return "N/D"
 
 
-def clean_team_name(name):
-    name = str(name).strip()
-    name = re.sub(r"\s+", " ", name)
-    return name.title() if name else ""
+def normalize_team_code(name):
+    code = str(name or "").strip().upper()
+    code = re.sub(r"[^A-Z]", "", code)
+    return code
 
 
-def try_extract_from_text(text):
-    text = str(text or "").strip().replace("–", "-").replace("—", "-")
+def prettify_team(name):
+    code = normalize_team_code(name)
+    if code in TEAM_MAP:
+        return TEAM_MAP[code]
+    if code:
+        return code.title()
+    return ""
+
+
+def extract_teams_from_desc(desc):
+    text = str(desc or "").strip().replace("–", "-").replace("—", "-")
     if not text:
-        return None
+        return "Casa", "Trasferta", text, "not_found"
 
     if " - " in text:
         parts = text.split(" - ", 1)
     elif "-" in text:
         parts = text.split("-", 1)
     else:
-        return None
+        return "Casa", "Trasferta", text, "not_found"
 
-    home = clean_team_name(parts[0])
-    away = clean_team_name(parts[1])
-    if home and away:
-        return home, away, text
-    return None
+    home_raw = parts[0].strip()
+    away_raw = parts[1].strip()
+    home_team = prettify_team(home_raw) or "Casa"
+    away_team = prettify_team(away_raw) or "Trasferta"
 
+    if home_team != "Casa" and away_team != "Trasferta":
+        return home_team, away_team, text, "descrizioneAvvenimento"
 
-def extract_teams(ev, result_list=None):
-    candidates = []
-
-    for key in [
-        "descrizioneAvvenimento",
-        "descrizioneEvento",
-        "evento",
-        "match",
-        "avvenimento",
-        "nomeEvento",
-        "labelEvento",
-        "competitor1",
-        "competitor2",
-        "descEvento",
-    ]:
-        if key in ev and ev.get(key):
-            candidates.append((f"ev.{key}", str(ev.get(key))))
-
-    if result_list:
-        for i, rr in enumerate(result_list[:5]):
-            for key in [
-                "descrizioneAvvenimento",
-                "descrizioneEvento",
-                "evento",
-                "match",
-                "avvenimento",
-                "nomeEvento",
-                "labelEvento",
-            ]:
-                if key in rr and rr.get(key):
-                    candidates.append((f"rr[{i}].{key}", str(rr.get(key))))
-
-    for source, text in candidates:
-        parsed = try_extract_from_text(text)
-        if parsed:
-            home, away, raw = parsed
-            return home, away, raw, source
-
-    return "Casa", "Trasferta", "", "not_found"
+    return "Casa", "Trasferta", text, "not_found"
 
 
 def fetch_matches():
@@ -136,7 +143,7 @@ def fetch_matches():
                     if not isinstance(result_list, list):
                         result_list = []
 
-                    home_team, away_team, event_name_raw, team_source = extract_teams(ev, result_list)
+                    home_team, away_team, event_name_raw, team_source = extract_teams_from_desc(desc)
                     gol_gol = infer_gol_gol(result_list)
 
                     raw_markets = []
@@ -144,12 +151,6 @@ def fetch_matches():
                         market = rr.get("descrizioneScommessa") or rr.get("modelloScommessa") or ""
                         result = rr.get("risultato") or rr.get("descrizioneEsito") or ""
                         raw_markets.append(f"{market}: {result}")
-
-                    debug_event_fields = {
-                        k: ev.get(k)
-                        for k in ev.keys()
-                        if any(token in k.lower() for token in ["desc", "event", "avven", "match", "team", "compet"])
-                    }
 
                     matches.append({
                         "match_id": f"{date_str}-{codice_palinsesto}-{codice_avvenimento}",
@@ -165,8 +166,7 @@ def fetch_matches():
                         "team_source": team_source,
                         "gol_gol": gol_gol,
                         "markets_count": len(result_list),
-                        "raw_markets": " | ".join(raw_markets),
-                        "debug_event_fields": str(debug_event_fields)
+                        "raw_markets": " | ".join(raw_markets)
                     })
 
     dedup = {}
@@ -278,20 +278,9 @@ st.dataframe(
     hide_index=True
 )
 
-st.subheader("Partite non ancora classificate (N/D)")
-st.dataframe(
-    df[df["gol_gol"] == "N/D"][["timestamp", "orario", "match_name", "home_team", "away_team", "descrizione_avvenimento", "event_name_raw", "team_source", "gol_gol", "raw_markets"]],
-    use_container_width=True,
-    hide_index=True
-)
-
 st.subheader("Storico completo")
 st.dataframe(
-    df[["timestamp", "orario", "giornata", "match_name", "home_team", "away_team", "team_source", "descrizione_avvenimento", "event_name_raw", "gol_gol", "markets_count", "raw_markets"]],
+    df[["timestamp", "orario", "giornata", "match_name", "home_team", "away_team", "team_source", "descrizione_avvenimento", "gol_gol", "markets_count", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
-
-with st.expander("Debug team names"):
-    debug_df = df[["timestamp", "orario", "match_name", "team_source", "descrizione_avvenimento", "event_name_raw", "debug_event_fields"]].head(50)
-    st.dataframe(debug_df, use_container_width=True, hide_index=True)
