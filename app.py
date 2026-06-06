@@ -80,7 +80,7 @@ def parse_score(text: str) -> Optional[tuple]:
 def fetch_results_from_sisal() -> List[Dict]:
     r = requests.get(
         ARCHIVE_URL,
-        timeout=20,
+        timeout=60,
         headers={"User-Agent": "Mozilla/5.0"},
     )
     r.raise_for_status()
