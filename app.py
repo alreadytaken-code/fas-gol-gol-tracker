@@ -1,15 +1,20 @@
-import streamlit as st
-import requests
-import pandas as pd
+import re
 from datetime import datetime
 from math import comb
+
+import pandas as pd
+import requests
+import streamlit as st
 
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('Archivio risultati Sisal con focus GOL / NO GOL')
+st.caption('Archivio risultati Sisal con focus GOL / NO GOL, forecast blocchi e ranking GG da screenshot quote/classifica')
 
 
+# -------------------------
+# Storico / API Sisal
+# -------------------------
 def infer_gol_gol(result_list):
     for rr in result_list:
         market = str(rr.get('descrizioneScommessa') or rr.get('modelloScommessa') or '').lower()
@@ -194,9 +199,11 @@ def build_backtest(df):
     preds = []
     for i in range(1, len(grouped)):
         hist = grouped.iloc[:i]
+
         def mean_rate(n):
             sub = hist.tail(n)
             return float(sub['rate'].mean()) if not sub.empty else 0.0
+
         rate_5 = mean_rate(5)
         rate_10 = mean_rate(10)
         rate_20 = mean_rate(20)
@@ -231,7 +238,6 @@ def build_probabilities(df):
     p_ge4 = binom_prob_at_least(4, 6, p)
     p_ge5 = binom_prob_at_least(5, 6, p)
     p_eq6 = p ** 6
-    p_ge4_3blocks = 1 - ((1 - p_ge4) ** 3)
 
     alert_level = 'low'
     if forecast['next_block_expected'] >= 4.5 or p_eq6 >= 0.12:
@@ -250,101 +256,251 @@ def build_probabilities(df):
         'p_ge4': p_ge4,
         'p_ge5': p_ge5,
         'p_eq6': p_eq6,
-        'p_ge4_3blocks': p_ge4_3blocks,
         'alert_level': alert_level,
         'alert_message': msg,
     }
 
 
-if st.button('Aggiorna risultati', type='primary'):
+# -------------------------
+# Screenshot / OCR manual assistito
+# -------------------------
+def clean_decimal(val):
     try:
-        matches = fetch_matches()
-        st.session_state['matches'] = matches
-        st.session_state['last_update'] = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
-        st.success(f'Partite trovate: {len(matches)}')
-    except Exception as e:
-        st.error(f'Errore API: {e}')
+        val = str(val).replace(',', '.').strip()
+        return float(val)
+    except Exception:
+        return None
+
+
+def implied_probability_from_odds(odds):
+    if odds is None or odds <= 1:
+        return None
+    return 1 / odds
+
+
+def score_label(score):
+    if score >= 0.62:
+        return 'Alta'
+    if score >= 0.52:
+        return 'Media'
+    return 'Bassa'
+
+
+def ranking_bonus(home_rank, away_rank):
+    if home_rank is None or away_rank is None:
+        return 0.0
+    diff = abs(home_rank - away_rank)
+    avg_rank = (home_rank + away_rank) / 2
+    bonus = 0.0
+    if diff <= 2:
+        bonus += 0.03
+    elif diff <= 5:
+        bonus += 0.015
+    elif diff >= 12:
+        bonus -= 0.03
+    if avg_rank <= 6:
+        bonus += 0.01
+    if avg_rank >= 14:
+        bonus += 0.005
+    return bonus
+
+
+def parse_text_lines(raw_text):
+    rows = []
+    pattern = re.compile(r'^(.*?)\s+([0-9]+[\.,][0-9]+)\s+([0-9]{1,2})\s+([0-9]{1,2})$')
+    for line in raw_text.splitlines():
+        line = ' '.join(line.strip().split())
+        if not line:
+            continue
+        m = pattern.match(line)
+        if m:
+            rows.append({
+                'match': m.group(1),
+                'quota_gg': clean_decimal(m.group(2)),
+                'rank_home': int(m.group(3)),
+                'rank_away': int(m.group(4)),
+            })
+    return pd.DataFrame(rows)
+
+
+def build_match_ranking(input_df):
+    if input_df.empty:
+        return pd.DataFrame(columns=['match', 'quota_gg', 'prob_implicita_gg', 'rank_home', 'rank_away', 'bonus_classifica', 'score_finale', 'fascia'])
+
+    df = input_df.copy()
+    df['prob_implicita_gg'] = df['quota_gg'].apply(implied_probability_from_odds)
+    df['bonus_classifica'] = df.apply(lambda r: ranking_bonus(r['rank_home'], r['rank_away']), axis=1)
+    df['score_finale'] = (df['prob_implicita_gg'].fillna(0) + df['bonus_classifica']).clip(lower=0, upper=0.95)
+    df['fascia'] = df['score_finale'].apply(score_label)
+    df = df.sort_values(['score_finale', 'prob_implicita_gg'], ascending=False)
+    return df[['match', 'quota_gg', 'prob_implicita_gg', 'rank_home', 'rank_away', 'bonus_classifica', 'score_finale', 'fascia']]
+
+
+# -------------------------
+# UI principale
+# -------------------------
+left, right = st.columns([1, 1])
+with left:
+    if st.button('Aggiorna risultati', type='primary'):
+        try:
+            matches = fetch_matches()
+            st.session_state['matches'] = matches
+            st.session_state['last_update'] = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
+            st.success(f'Partite trovate: {len(matches)}')
+        except Exception as e:
+            st.error(f'Errore API: {e}')
+with right:
+    st.caption('Per il modulo screenshot puoi caricare immagine e inserire/correggere manualmente i dati letti.')
 
 matches = st.session_state.get('matches', [])
 last_update = st.session_state.get('last_update', '-')
 
-if not matches:
-    st.info("Premi 'Aggiorna risultati' per caricare i dati.")
-    st.stop()
+if matches:
+    df = pd.DataFrame(matches)
+    df = df.sort_values(['orario', 'timestamp'], ascending=False)
 
-df = pd.DataFrame(matches)
-df = df.sort_values(['orario', 'timestamp'], ascending=False)
+    st.markdown(f'**Ultimo aggiornamento:** {last_update}')
 
-st.markdown(f'**Ultimo aggiornamento:** {last_update}')
+    trend = build_trend_metrics(df)
+    col1, col2, col3 = st.columns(3)
+    col1.metric('Partite GG ultimi 5 blocchi', trend['last5'], trend['last5'] - trend['prev5'])
+    col2.metric('Partite GG ultimi 10 blocchi', trend['last10'], trend['last10'] - trend['prev10'])
+    col3.metric('% partite GG ultimo blocco', f"{trend['latest_block_pct']}%")
 
-trend = build_trend_metrics(df)
-col1, col2, col3 = st.columns(3)
-col1.metric('Partite GG ultimi 5 blocchi', trend['last5'], trend['last5'] - trend['prev5'])
-col2.metric('Partite GG ultimi 10 blocchi', trend['last10'], trend['last10'] - trend['prev10'])
-col3.metric('% partite GG ultimo blocco', f"{trend['latest_block_pct']}%")
+    st.subheader('Previsione prossimi blocchi')
+    forecast = build_forecast(df)
+    fc1, fc2, fc3 = st.columns(3)
+    fc1.metric('GG attesi prossimo blocco', forecast['next_block_expected'])
+    fc2.metric('Stima arrotondata prossimo blocco', forecast['next_block_rounded'])
+    fc3.metric('GG attesi prossimi 3 blocchi', forecast['next_3_blocks_expected'])
+    st.caption(f"Range stimato prossimo blocco: {forecast['range_min']} - {forecast['range_max']} GG")
+    st.dataframe(forecast['details'], use_container_width=True, hide_index=True)
 
-st.subheader('Previsione prossimi blocchi')
-forecast = build_forecast(df)
-fc1, fc2, fc3 = st.columns(3)
-fc1.metric('GG attesi prossimo blocco', forecast['next_block_expected'])
-fc2.metric('Stima arrotondata prossimo blocco', forecast['next_block_rounded'])
-fc3.metric('GG attesi prossimi 3 blocchi', forecast['next_3_blocks_expected'])
-st.caption(f"Range stimato prossimo blocco: {forecast['range_min']} - {forecast['range_max']} GG")
-st.dataframe(forecast['details'], use_container_width=True, hide_index=True)
+    st.subheader('Backtest e probabilità')
+    backtest = build_backtest(df)
+    prob = build_probabilities(df)
+    bt1, bt2, bt3 = st.columns(3)
+    bt1.metric('MAE ultimi 10 blocchi', backtest['mae_10'])
+    bt2.metric('MAE ultimi 20 blocchi', backtest['mae_20'])
+    bt3.metric('Bias medio', backtest['bias'])
 
-st.subheader('Backtest e probabilità')
-backtest = build_backtest(df)
-prob = build_probabilities(df)
+    pb1, pb2, pb3 = st.columns(3)
+    pb1.metric('Probabilità 4+ GG', f"{prob['p_ge4']:.1%}")
+    pb2.metric('Probabilità 5+ GG', f"{prob['p_ge5']:.1%}")
+    pb3.metric('Probabilità 6 GG', f"{prob['p_eq6']:.1%}")
 
-bt1, bt2, bt3 = st.columns(3)
-bt1.metric('MAE ultimi 10 blocchi', backtest['mae_10'])
-bt2.metric('MAE ultimi 20 blocchi', backtest['mae_20'])
-bt3.metric('Bias medio', backtest['bias'])
+    if prob['alert_level'] == 'high':
+        st.error(prob['alert_message'])
+    elif prob['alert_level'] == 'medium':
+        st.warning(prob['alert_message'])
+    else:
+        st.info(prob['alert_message'])
 
-pb1, pb2, pb3 = st.columns(3)
-pb1.metric('Probabilità 4+ GG', f"{prob['p_ge4']:.1%}")
-pb2.metric('Probabilità 5+ GG', f"{prob['p_ge5']:.1%}")
-pb3.metric('Probabilità 6 GG', f"{prob['p_eq6']:.1%}")
+    with st.expander('Dettaglio backtest', expanded=False):
+        st.dataframe(backtest['table'], use_container_width=True, hide_index=True)
 
-if prob['alert_level'] == 'high':
-    st.error(prob['alert_message'])
-elif prob['alert_level'] == 'medium':
-    st.warning(prob['alert_message'])
+    st.subheader('Blocchi con 6 GG su 6')
+    all_gg_stats = build_all_gg_stats(df)
+    col4, col5 = st.columns(2)
+    col4.metric('Totale blocchi 6 su 6', all_gg_stats['total_all_gg_blocks'])
+    col5.metric('Serie aperta 6 su 6', all_gg_stats['latest_streak'])
+
+    with st.expander('Dettaglio blocchi 6 GG su 6', expanded=False):
+        st.dataframe(all_gg_stats['blocks_table'], use_container_width=True, hide_index=True)
+
+    with st.expander('Storico risultati per blocchi orari', expanded=False):
+        storico_df = df[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].copy()
+        storico_df = storico_df.sort_values(['orario', 'giornata', 'codice_avvenimento'], ascending=[False, False, False])
+        orari_unici = storico_df['orario'].dropna().unique().tolist()
+        for i, ora in enumerate(orari_unici):
+            blocco = storico_df[storico_df['orario'] == ora].copy()
+            st.markdown(f'### Blocco {ora}')
+            st.dataframe(blocco[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']], use_container_width=True, hide_index=True)
+            if i < len(orari_unici) - 1:
+                st.divider()
+
+    st.subheader('Blocchi orari')
+    blocks_df = build_blocks(df)
+    st.dataframe(blocks_df, use_container_width=True, hide_index=True)
+
+    if not blocks_df.empty:
+        st.subheader('Grafico blocchi orari')
+        bar_df = blocks_df.set_index('orario')[['GOL']]
+        st.bar_chart(bar_df, height=320)
+
+        st.subheader('Trend percentuale')
+        trend_df = blocks_df.set_index('orario')[['% sul totale']]
+        st.line_chart(trend_df, height=280)
 else:
-    st.info(prob['alert_message'])
+    st.info("Premi 'Aggiorna risultati' per caricare i dati storici del giorno.")
 
-with st.expander('Dettaglio backtest', expanded=False):
-    st.dataframe(backtest['table'], use_container_width=True, hide_index=True)
 
-st.subheader('Blocchi con 6 GG su 6')
-all_gg_stats = build_all_gg_stats(df)
-col4, col5 = st.columns(2)
-col4.metric('Totale blocchi 6 su 6', all_gg_stats['total_all_gg_blocks'])
-col5.metric('Serie aperta 6 su 6', all_gg_stats['latest_streak'])
+# -------------------------
+# Sezione screenshot quote + classifica
+# -------------------------
+st.divider()
+st.subheader('Ranking GG da screenshot quote + classifica')
 
-with st.expander('Dettaglio blocchi 6 GG su 6', expanded=False):
-    st.dataframe(all_gg_stats['blocks_table'], use_container_width=True, hide_index=True)
+uploaded_image = st.file_uploader('Carica screenshot con partite, quota GG e classifica', type=['png', 'jpg', 'jpeg'])
+if uploaded_image is not None:
+    st.image(uploaded_image, caption='Screenshot caricato', use_container_width=True)
 
-with st.expander('Storico risultati per blocchi orari', expanded=False):
-    storico_df = df[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].copy()
-    storico_df = storico_df.sort_values(['orario', 'giornata', 'codice_avvenimento'], ascending=[False, False, False])
-    orari_unici = storico_df['orario'].dropna().unique().tolist()
-    for i, ora in enumerate(orari_unici):
-        blocco = storico_df[storico_df['orario'] == ora].copy()
-        st.markdown(f'### Blocco {ora}')
-        st.dataframe(blocco[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']], use_container_width=True, hide_index=True)
-        if i < len(orari_unici) - 1:
-            st.divider()
+st.markdown('### Inserimento dati partite')
+st.caption('Formato testo assistito per parsing automatico: NomePartita quotaGG rankCasa rankTrasferta. Esempio: TeamA-TeamB 1.72 4 6')
+raw_text = st.text_area(
+    'Incolla qui il testo OCR oppure compila manualmente le righe',
+    height=180,
+    placeholder='Alpha-Beta 1.75 4 6\nGamma-Delta 1.92 8 10\nEpsilon-Zeta 2.05 3 14'
+)
 
-st.subheader('Blocchi orari')
-blocks_df = build_blocks(df)
-st.dataframe(blocks_df, use_container_width=True, hide_index=True)
+parsed_df = parse_text_lines(raw_text) if raw_text.strip() else pd.DataFrame(columns=['match', 'quota_gg', 'rank_home', 'rank_away'])
 
-if not blocks_df.empty:
-    st.subheader('Grafico blocchi orari')
-    bar_df = blocks_df.set_index('orario')[['GOL']]
-    st.bar_chart(bar_df, height=320)
+st.markdown('### Tabella modificabile')
+editable_df = st.data_editor(
+    parsed_df if not parsed_df.empty else pd.DataFrame([
+        {'match': '', 'quota_gg': None, 'rank_home': None, 'rank_away': None}
+    ]),
+    num_rows='dynamic',
+    use_container_width=True,
+    hide_index=True,
+    key='gg_editor'
+)
 
-    st.subheader('Trend percentuale')
-    trend_df = blocks_df.set_index('orario')[['% sul totale']]
-    st.line_chart(trend_df, height=280)
+clean_rows = editable_df.copy()
+if not clean_rows.empty:
+    clean_rows['quota_gg'] = clean_rows['quota_gg'].apply(clean_decimal)
+    clean_rows['rank_home'] = pd.to_numeric(clean_rows['rank_home'], errors='coerce')
+    clean_rows['rank_away'] = pd.to_numeric(clean_rows['rank_away'], errors='coerce')
+    clean_rows = clean_rows.dropna(subset=['match', 'quota_gg'])
+    clean_rows['match'] = clean_rows['match'].astype(str).str.strip()
+    clean_rows = clean_rows[clean_rows['match'] != '']
+
+ranking_df = build_match_ranking(clean_rows) if not clean_rows.empty else pd.DataFrame()
+
+if not ranking_df.empty:
+    st.markdown('### Ranking finale GG')
+    top1, top2, top3 = st.columns(3)
+    top_row = ranking_df.iloc[0]
+    top1.metric('Top match GG', str(top_row['match']))
+    top2.metric('Score finale top', f"{top_row['score_finale']:.3f}")
+    top3.metric('Probabilità implicita top', f"{top_row['prob_implicita_gg']:.1%}")
+
+    display_df = ranking_df.copy()
+    display_df['prob_implicita_gg'] = (display_df['prob_implicita_gg'] * 100).round(2)
+    display_df['bonus_classifica'] = (display_df['bonus_classifica'] * 100).round(2)
+    display_df['score_finale'] = (display_df['score_finale'] * 100).round(2)
+    display_df.columns = ['Match', 'Quota GG', 'Prob. implicita GG %', 'Rank casa', 'Rank trasferta', 'Bonus classifica %', 'Score finale %', 'Fascia']
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    chart_df = ranking_df.set_index('match')[['score_finale']]
+    st.bar_chart(chart_df, height=320)
+
+    with st.expander('Logica punteggio usata', expanded=False):
+        st.write('Score finale = probabilità implicita dalla quota GG + bonus/malus classifica.')
+        st.write('- differenza classifica <= 2: +3%')
+        st.write('- differenza classifica <= 5: +1.5%')
+        st.write('- differenza classifica >= 12: -3%')
+        st.write('- media classifica <= 6: +1%')
+        st.write('- media classifica >= 14: +0.5%')
+else:
+    st.info('Carica uno screenshot e incolla/correggi almeno una riga con match, quota GG, rank casa e rank trasferta per ottenere il ranking GG.')
