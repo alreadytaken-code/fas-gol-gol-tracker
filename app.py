@@ -1,4 +1,3 @@
-import io
 import re
 from datetime import datetime
 from math import comb
@@ -6,18 +5,11 @@ from math import comb
 import pandas as pd
 import requests
 import streamlit as st
-from PIL import Image, ImageOps, ImageFilter
 
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('Archivio risultati Sisal con focus GOL / NO GOL, forecast blocchi e ranking GG da screenshot quote/classifica con OCR automatico')
-
-
-@st.cache_resource
-def get_easyocr_reader():
-    import easyocr
-    return easyocr.Reader(['en'], gpu=False)
+st.caption('Archivio risultati Sisal con focus GOL / NO GOL, forecast blocchi e ranking GG da inserimento manuale quote/classifica')
 
 
 # -------------------------
@@ -270,7 +262,7 @@ def build_probabilities(df):
 
 
 # -------------------------
-# OCR / ranking singole partite
+# Inserimento manuale match
 # -------------------------
 def clean_decimal(val):
     try:
@@ -313,29 +305,6 @@ def ranking_bonus(home_rank, away_rank):
     return bonus
 
 
-def preprocess_image(uploaded_image):
-    image = Image.open(uploaded_image).convert('L')
-    image = ImageOps.autocontrast(image)
-    image = image.filter(ImageFilter.SHARPEN)
-    return image
-
-
-def run_easyocr(uploaded_image):
-    image = preprocess_image(uploaded_image)
-    reader = get_easyocr_reader()
-    results = reader.readtext(image, detail=1, paragraph=False)
-    lines = []
-    for item in results:
-        bbox, text, conf = item
-        lines.append({'text': str(text).strip(), 'confidence': float(conf)})
-    return image, lines
-
-
-def build_ocr_text(lines, min_conf=0.20):
-    filtered = [x['text'] for x in lines if x['text'] and x['confidence'] >= min_conf]
-    return '\n'.join(filtered)
-
-
 def parse_text_lines(raw_text):
     rows = []
     pattern = re.compile(r'^(.*?)\s+([0-9]+[\.,][0-9]+)\s+([0-9]{1,2})\s+([0-9]{1,2})$')
@@ -369,18 +338,14 @@ def build_match_ranking(input_df):
 # -------------------------
 # UI principale storico
 # -------------------------
-left, right = st.columns([1, 1])
-with left:
-    if st.button('Aggiorna risultati', type='primary'):
-        try:
-            matches = fetch_matches()
-            st.session_state['matches'] = matches
-            st.session_state['last_update'] = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
-            st.success(f'Partite trovate: {len(matches)}')
-        except Exception as e:
-            st.error(f'Errore API: {e}')
-with right:
-    st.caption('Il modulo screenshot usa OCR automatico EasyOCR e resta correggibile manualmente.')
+if st.button('Aggiorna risultati', type='primary'):
+    try:
+        matches = fetch_matches()
+        st.session_state['matches'] = matches
+        st.session_state['last_update'] = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
+        st.success(f'Partite trovate: {len(matches)}')
+    except Exception as e:
+        st.error(f'Errore API: {e}')
 
 matches = st.session_state.get('matches', [])
 last_update = st.session_state.get('last_update', '-')
@@ -464,68 +429,31 @@ else:
 
 
 # -------------------------
-# UI OCR automatico
+# UI manuale quote/classifica
 # -------------------------
 st.divider()
-st.subheader('Ranking GG da screenshot quote + classifica')
+st.subheader('Ranking GG da input manuale')
+st.caption('Inserisci una riga per partita nel formato: NomePartita quotaGG rankCasa rankTrasferta')
+st.caption('Esempio: Alpha-Beta 1.75 4 6')
 
-uploaded_image = st.file_uploader('Carica screenshot con partite, quota GG e classifica', type=['png', 'jpg', 'jpeg'])
-auto_text = ''
-if uploaded_image is not None:
-    st.image(uploaded_image, caption='Screenshot caricato', use_container_width=True)
-    ocr_col1, ocr_col2 = st.columns([1, 1])
-    with ocr_col1:
-        run_ocr = st.button('Esegui OCR automatico')
-    with ocr_col2:
-        min_conf = st.slider('Confidenza minima OCR', min_value=0.0, max_value=1.0, value=0.20, step=0.05)
-
-    if run_ocr:
-        try:
-            processed_image, ocr_lines = run_easyocr(uploaded_image)
-            st.image(processed_image, caption='Immagine preprocessata per OCR', use_container_width=True)
-            auto_text = build_ocr_text(ocr_lines, min_conf=min_conf)
-            st.session_state['ocr_text_auto'] = auto_text
-            with st.expander('Dettaglio righe OCR', expanded=False):
-                st.dataframe(pd.DataFrame(ocr_lines), use_container_width=True, hide_index=True)
-        except Exception as e:
-            st.error(f'OCR non disponibile o errore durante l\'estrazione: {e}. Installa easyocr nel progetto.')
-
-saved_auto_text = st.session_state.get('ocr_text_auto', '')
-
-st.markdown('### Testo OCR / correzione manuale')
-st.caption('Formato atteso per parsing automatico: NomePartita quotaGG rankCasa rankTrasferta. Esempio: TeamA-TeamB 1.72 4 6')
 raw_text = st.text_area(
-    'Modifica qui il testo estratto automaticamente oppure incolla manualmente le righe',
-    value=saved_auto_text,
+    'Inserimento manuale partite',
     height=220,
     placeholder='Alpha-Beta 1.75 4 6\nGamma-Delta 1.92 8 10\nEpsilon-Zeta 2.05 3 14'
 )
 
 parsed_df = parse_text_lines(raw_text) if raw_text.strip() else pd.DataFrame(columns=['match', 'quota_gg', 'rank_home', 'rank_away'])
 
-st.markdown('### Tabella modificabile')
-editable_df = st.data_editor(
-    parsed_df if not parsed_df.empty else pd.DataFrame([
-        {'match': '', 'quota_gg': None, 'rank_home': None, 'rank_away': None}
-    ]),
-    num_rows='dynamic',
-    use_container_width=True,
-    hide_index=True,
-    key='gg_editor_auto'
-)
+if not raw_text.strip():
+    st.info('Inserisci le righe manualmente per ottenere il ranking GG.')
+elif parsed_df.empty:
+    st.error('Nessuna riga riconosciuta. Controlla il formato: NomePartita quotaGG rankCasa rankTrasferta')
+else:
+    ranking_df = build_match_ranking(parsed_df)
 
-clean_rows = editable_df.copy()
-if not clean_rows.empty:
-    clean_rows['quota_gg'] = clean_rows['quota_gg'].apply(clean_decimal)
-    clean_rows['rank_home'] = pd.to_numeric(clean_rows['rank_home'], errors='coerce')
-    clean_rows['rank_away'] = pd.to_numeric(clean_rows['rank_away'], errors='coerce')
-    clean_rows = clean_rows.dropna(subset=['match', 'quota_gg'])
-    clean_rows['match'] = clean_rows['match'].astype(str).str.strip()
-    clean_rows = clean_rows[clean_rows['match'] != '']
+    st.markdown('### Partite riconosciute')
+    st.dataframe(parsed_df, use_container_width=True, hide_index=True)
 
-ranking_df = build_match_ranking(clean_rows) if not clean_rows.empty else pd.DataFrame()
-
-if not ranking_df.empty:
     st.markdown('### Ranking finale GG')
     top1, top2, top3 = st.columns(3)
     top_row = ranking_df.iloc[0]
@@ -550,5 +478,4 @@ if not ranking_df.empty:
         st.write('- differenza classifica >= 12: -3%')
         st.write('- media classifica <= 6: +1%')
         st.write('- media classifica >= 14: +0.5%')
-else:
-    st.info('Carica uno screenshot, esegui OCR automatico e correggi la tabella per ottenere il ranking GG finale.')
+
