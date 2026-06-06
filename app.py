@@ -181,6 +181,72 @@ def build_all_gg_stats(df):
     }
 
 
+def build_forecast(df):
+    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
+    if valid_df.empty:
+        return {
+            'rate_5': 0.0,
+            'rate_10': 0.0,
+            'rate_20': 0.0,
+            'weighted_rate': 0.0,
+            'next_block_expected': 0.0,
+            'next_block_rounded': 0,
+            'next_3_blocks_expected': 0.0,
+            'range_min': 0,
+            'range_max': 0,
+            'details': pd.DataFrame(columns=['finestra', 'percentuale_GG'])
+        }
+
+    grouped = valid_df.groupby('orario').agg(
+        totale=('esito', 'count'),
+        GG=('esito', lambda x: (x == 'GOL').sum())
+    ).reset_index().sort_values('orario', ascending=False)
+
+    grouped = grouped[grouped['totale'] > 0].copy()
+    grouped['rate'] = grouped['GG'] / grouped['totale']
+
+    def mean_rate(n):
+        subset = grouped.head(n)
+        if subset.empty:
+            return 0.0
+        return float(subset['rate'].mean())
+
+    rate_5 = mean_rate(5)
+    rate_10 = mean_rate(10)
+    rate_20 = mean_rate(20)
+
+    weighted_rate = (0.5 * rate_5) + (0.3 * rate_10) + (0.2 * rate_20)
+    weighted_rate = max(0.0, min(1.0, weighted_rate))
+
+    matches_per_block = 6
+    next_block_expected = round(weighted_rate * matches_per_block, 2)
+    next_block_rounded = int(round(next_block_expected))
+    next_3_blocks_expected = round(next_block_expected * 3, 2)
+
+    range_min = max(0, int(round(next_block_expected - 1)))
+    range_max = min(matches_per_block, int(round(next_block_expected + 1)))
+
+    details = pd.DataFrame([
+        {'finestra': 'Ultimi 5 blocchi', 'percentuale_GG': round(rate_5 * 100, 2)},
+        {'finestra': 'Ultimi 10 blocchi', 'percentuale_GG': round(rate_10 * 100, 2)},
+        {'finestra': 'Ultimi 20 blocchi', 'percentuale_GG': round(rate_20 * 100, 2)},
+        {'finestra': 'Media pesata finale', 'percentuale_GG': round(weighted_rate * 100, 2)},
+    ])
+
+    return {
+        'rate_5': rate_5,
+        'rate_10': rate_10,
+        'rate_20': rate_20,
+        'weighted_rate': weighted_rate,
+        'next_block_expected': next_block_expected,
+        'next_block_rounded': next_block_rounded,
+        'next_3_blocks_expected': next_3_blocks_expected,
+        'range_min': range_min,
+        'range_max': range_max,
+        'details': details
+    }
+
+
 if st.button('Aggiorna risultati', type='primary'):
     try:
         matches = fetch_matches()
@@ -208,6 +274,15 @@ col1.metric('Partite GG ultimi 5 blocchi', trend['last5'], trend['last5'] - tren
 col2.metric('Partite GG ultimi 10 blocchi', trend['last10'], trend['last10'] - trend['prev10'])
 col3.metric('% partite GG ultimo blocco', f"{trend['latest_block_pct']}%")
 
+st.subheader('Previsione prossimi blocchi')
+forecast = build_forecast(df)
+fc1, fc2, fc3 = st.columns(3)
+fc1.metric('GG attesi prossimo blocco', forecast['next_block_expected'])
+fc2.metric('Stima arrotondata prossimo blocco', forecast['next_block_rounded'])
+fc3.metric('GG attesi prossimi 3 blocchi', forecast['next_3_blocks_expected'])
+st.caption(f"Range stimato prossimo blocco: {forecast['range_min']} - {forecast['range_max']} GG")
+st.dataframe(forecast['details'], use_container_width=True, hide_index=True)
+
 st.subheader('Blocchi con 6 GG su 6')
 all_gg_stats = build_all_gg_stats(df)
 col4, col5 = st.columns(2)
@@ -215,35 +290,4 @@ col4.metric('Totale blocchi 6 su 6', all_gg_stats['total_all_gg_blocks'])
 col5.metric('Serie aperta 6 su 6', all_gg_stats['latest_streak'])
 
 with st.expander('Dettaglio blocchi 6 GG su 6', expanded=False):
-    st.dataframe(all_gg_stats['blocks_table'], use_container_width=True, hide_index=True)
-
-with st.expander('Storico risultati per blocchi orari', expanded=False):
-    storico_df = df[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].copy()
-    storico_df = storico_df.sort_values(['orario', 'giornata', 'codice_avvenimento'], ascending=[False, False, False])
-
-    orari_unici = storico_df['orario'].dropna().unique().tolist()
-
-    for i, ora in enumerate(orari_unici):
-        blocco = storico_df[storico_df['orario'] == ora].copy()
-        st.markdown(f'### Blocco {ora}')
-        st.dataframe(
-            blocco[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']],
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        if i < len(orari_unici) - 1:
-            st.divider()
-
-st.subheader('Blocchi orari')
-blocks_df = build_blocks(df)
-st.dataframe(blocks_df, use_container_width=True, hide_index=True)
-
-if not blocks_df.empty:
-    st.subheader('Grafico blocchi orari')
-    bar_df = blocks_df.set_index('orario')[['GOL']]
-    st.bar_chart(bar_df, height=320)
-
-    st.subheader('Trend percentuale')
-    trend_df = blocks_df.set_index('orario')[['% sul totale']]
-    st.line_chart(trend_df, height=280)
+    st.dataframe(all_gg_stats['blocks_tabl
