@@ -32,6 +32,7 @@ def clean_team_sigla(value):
 
 def get_event_description(ev):
     candidates = [
+        ev.get("descrizioneAvventimento"),  # campo corretto trovato nel JSON
         ev.get("descrizioneAvvenimento"),
         ev.get("descrizioneEvento"),
         ev.get("evento"),
@@ -135,7 +136,7 @@ def fetch_matches():
                         "home_team": home_team,
                         "away_team": away_team,
                         "match_name": f"{home_team}-{away_team}",
-                        "descrizione_avvenimento": raw_desc,
+                        "descrizione_avventimento": raw_desc,
                         "gol_gol": gol_gol,
                         "markets_count": len(result_list),
                         "raw_markets": " | ".join(raw_markets)
@@ -252,7 +253,7 @@ st.dataframe(
 
 st.subheader("Storico completo")
 st.dataframe(
-    df[["timestamp", "orario", "giornata", "match_name", "home_team", "away_team", "descrizione_avvenimento", "gol_gol", "markets_count", "raw_markets"]],
+    df[["timestamp", "orario", "giornata", "match_name", "home_team", "away_team", "descrizione_avventimento", "gol_gol", "markets_count", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
