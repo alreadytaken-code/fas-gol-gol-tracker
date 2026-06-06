@@ -83,7 +83,13 @@ def fetch_results_from_sisal() -> List[Dict]:
     )
     r.raise_for_status()
     data = r.json()
-
+st.write("TIPO ROOT JSON:", type(data).__name__)
+if isinstance(data, dict):
+    st.write("CHIAVI ROOT:", list(data.keys())[:30])
+elif isinstance(data, list):
+    st.write("LUNGHEZZA LISTA ROOT:", len(data))
+    st.write("PRIMO ELEMENTO:", data[0] if data else "lista vuota")
+    
     matches = []
 
     def walk(obj):
