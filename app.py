@@ -290,4 +290,35 @@ col4.metric('Totale blocchi 6 su 6', all_gg_stats['total_all_gg_blocks'])
 col5.metric('Serie aperta 6 su 6', all_gg_stats['latest_streak'])
 
 with st.expander('Dettaglio blocchi 6 GG su 6', expanded=False):
-    st.dataframe(all_gg_stats['blocks_tabl
+    st.dataframe(all_gg_stats['blocks_table'], use_container_width=True, hide_index=True)
+
+with st.expander('Storico risultati per blocchi orari', expanded=False):
+    storico_df = df[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].copy()
+    storico_df = storico_df.sort_values(['orario', 'giornata', 'codice_avvenimento'], ascending=[False, False, False])
+
+    orari_unici = storico_df['orario'].dropna().unique().tolist()
+
+    for i, ora in enumerate(orari_unici):
+        blocco = storico_df[storico_df['orario'] == ora].copy()
+        st.markdown(f'### Blocco {ora}')
+        st.dataframe(
+            blocco[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        if i < len(orari_unici) - 1:
+            st.divider()
+
+st.subheader('Blocchi orari')
+blocks_df = build_blocks(df)
+st.dataframe(blocks_df, use_container_width=True, hide_index=True)
+
+if not blocks_df.empty:
+    st.subheader('Grafico blocchi orari')
+    bar_df = blocks_df.set_index('orario')[['GOL']]
+    st.bar_chart(bar_df, height=320)
+
+    st.subheader('Trend percentuale')
+    trend_df = blocks_df.set_index('orario')[['% sul totale']]
+    st.line_chart(trend_df, height=280)
