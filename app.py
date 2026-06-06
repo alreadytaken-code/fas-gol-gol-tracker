@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
+import re
 
 st.set_page_config(page_title="FAS League GOL GOL Tracker", layout="wide")
 
@@ -21,6 +22,42 @@ def infer_gol_gol(result_list):
                 return "NO"
 
     return "N/D"
+
+
+def clean_team_name(name):
+    name = str(name).strip()
+    name = re.sub(r"\s+", " ", name)
+    return name.title() if name else ""
+
+
+def extract_teams(desc, result_list=None):
+    desc = str(desc or "").strip()
+    desc_clean = desc.replace("–", "-").replace("—", "-")
+
+    candidates = [desc_clean]
+
+    if result_list:
+        for rr in result_list:
+            for key in ["descrizioneAvvenimento", "descrizioneEvento", "evento", "match", "avvenimento"]:
+                value = rr.get(key)
+                if value:
+                    candidates.append(str(value).strip().replace("–", "-").replace("—", "-"))
+
+    for text in candidates:
+        if " - " in text:
+            parts = text.split(" - ", 1)
+            home = clean_team_name(parts[0])
+            away = clean_team_name(parts[1])
+            if home and away:
+                return home, away, text
+        if "-" in text:
+            parts = text.split("-", 1)
+            home = clean_team_name(parts[0])
+            away = clean_team_name(parts[1])
+            if home and away:
+                return home, away, text
+
+    return "Casa", "Trasferta", desc
 
 
 def fetch_matches():
@@ -65,23 +102,11 @@ def fetch_matches():
                     codice_palinsesto = str(ev.get("codicePalinsesto", "")).strip()
                     codice_avvenimento = str(ev.get("codiceAvvenimento", "")).strip()
 
-                    home_team = "Casa"
-                    away_team = "Trasferta"
-                    desc_clean = desc.replace("–", "-").replace("—", "-").strip()
-
-                    if " - " in desc_clean:
-                        parts = desc_clean.split(" - ", 1)
-                        home_team = parts[0].strip() or "Casa"
-                        away_team = parts[1].strip() or "Trasferta"
-                    elif "-" in desc_clean:
-                        parts = desc_clean.split("-", 1)
-                        home_team = parts[0].strip() or "Casa"
-                        away_team = parts[1].strip() or "Trasferta"
-
                     result_list = ev.get("risultatoScommessaUfficialeList", [])
                     if not isinstance(result_list, list):
                         result_list = []
 
+                    home_team, away_team, event_name_raw = extract_teams(desc, result_list)
                     gol_gol = infer_gol_gol(result_list)
 
                     raw_markets = []
@@ -98,7 +123,9 @@ def fetch_matches():
                         "giornata": giornata,
                         "home_team": home_team,
                         "away_team": away_team,
+                        "match_name": f"{home_team} - {away_team}",
                         "descrizione_avvenimento": desc,
+                        "event_name_raw": event_name_raw,
                         "gol_gol": gol_gol,
                         "markets_count": len(result_list),
                         "raw_markets": " | ".join(raw_markets)
@@ -145,8 +172,8 @@ def build_time_blocks(df):
     grouped["gol_gol_no"] = grouped["NO"]
     grouped["non_classificate"] = grouped["N/D"]
     grouped["perc_gol_gol"] = ((grouped["gol_gol_si"] / grouped["totale_partite"]) * 100).round(2)
+    grouped = grouped.sort_values("orario", ascending=False)
 
-    grouped = grouped.sort_values("orario", ascending=True)
     return grouped[["orario", "totale_partite", "gol_gol_si", "gol_gol_no", "non_classificate", "perc_gol_gol"]]
 
 
@@ -165,6 +192,7 @@ if not matches:
     st.stop()
 
 df = pd.DataFrame(matches)
+df = df.sort_values(["orario", "timestamp"], ascending=False)
 
 valid_df = df[df["gol_gol"].isin(["SI", "NO"])].copy()
 stats10 = build_stats(valid_df, 10)
@@ -200,28 +228,28 @@ if not valid_df.empty:
 
 st.subheader("Partite uscite GOL GOL (SI)")
 st.dataframe(
-    df[df["gol_gol"] == "SI"][["timestamp", "orario", "home_team", "away_team", "gol_gol", "raw_markets"]],
+    df[df["gol_gol"] == "SI"][["timestamp", "orario", "match_name", "home_team", "away_team", "gol_gol", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
 
 st.subheader("Partite uscite NO GOL GOL (NO)")
 st.dataframe(
-    df[df["gol_gol"] == "NO"][["timestamp", "orario", "home_team", "away_team", "gol_gol", "raw_markets"]],
+    df[df["gol_gol"] == "NO"][["timestamp", "orario", "match_name", "home_team", "away_team", "gol_gol", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
 
 st.subheader("Partite non ancora classificate (N/D)")
 st.dataframe(
-    df[df["gol_gol"] == "N/D"][["timestamp", "orario", "home_team", "away_team", "descrizione_avvenimento", "gol_gol", "raw_markets"]],
+    df[df["gol_gol"] == "N/D"][["timestamp", "orario", "match_name", "home_team", "away_team", "descrizione_avvenimento", "event_name_raw", "gol_gol", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
 
 st.subheader("Storico completo")
 st.dataframe(
-    df[["timestamp", "orario", "giornata", "home_team", "away_team", "descrizione_avvenimento", "gol_gol", "markets_count", "raw_markets"]],
+    df[["timestamp", "orario", "giornata", "match_name", "home_team", "away_team", "descrizione_avvenimento", "event_name_raw", "gol_gol", "markets_count", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
