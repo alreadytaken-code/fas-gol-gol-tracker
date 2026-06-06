@@ -9,7 +9,7 @@ import streamlit as st
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('Archivio risultati Sisal con forecast blocchi, backtest e predict GG/NG finale basata su massimo 10 blocchi e ranking Top-N coerente con i GG attesi totali')
+st.caption('Archivio risultati Sisal con forecast su massimo 10 blocchi, predict Top-N e reset giornaliero dopo l\'1:00 quando premi Aggiorna risultati')
 
 TEAM_NAME_MAP = {
     'GEN': 'GEN', 'NAP': 'NAP', 'UDI': 'UDI', 'MIL': 'MIL', 'INT': 'INT', 'ROM': 'ROM',
@@ -488,11 +488,33 @@ def build_manual_summary(pred_df, expected_gg_total, gg_slots):
     }
 
 
+def maybe_reset_daily_after_one():
+    now = datetime.now()
+    today = now.date().isoformat()
+    current_hour = now.hour
+    active_data_day = st.session_state.get('active_data_day')
+
+    if active_data_day is None:
+        st.session_state['active_data_day'] = today
+        return False
+
+    if active_data_day != today and current_hour >= 1:
+        st.session_state['matches'] = []
+        st.session_state['last_update'] = '-'
+        st.session_state['active_data_day'] = today
+        st.session_state['reset_notice'] = f'Reset giornaliero eseguito automaticamente alle {now.strftime("%H:%M:%S")}. '
+        return True
+    return False
+
+
 if st.button('Aggiorna risultati', type='primary'):
+    did_reset = maybe_reset_daily_after_one()
     try:
         matches = fetch_matches()
         st.session_state['matches'] = matches
         st.session_state['last_update'] = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
+        if did_reset:
+            st.success(st.session_state.get('reset_notice', 'Reset giornaliero eseguito.'))
         st.success(f'Partite trovate: {len(matches)}')
     except Exception as e:
         st.error(f'Errore API: {e}')
@@ -500,10 +522,14 @@ if st.button('Aggiorna risultati', type='primary'):
 matches = st.session_state.get('matches', [])
 last_update = st.session_state.get('last_update', '-')
 
+if 'active_data_day' not in st.session_state:
+    st.session_state['active_data_day'] = datetime.now().date().isoformat()
+
 df = pd.DataFrame(matches) if matches else pd.DataFrame(columns=['orario', 'timestamp', 'esito', 'giornata', 'home_team', 'away_team'])
 if not df.empty:
     df = df.sort_values(['orario', 'timestamp'], ascending=False)
     st.markdown(f'**Ultimo aggiornamento:** {last_update}')
+    st.caption(f"Giorno dati attivo: {st.session_state.get('active_data_day')}")
 
     trend = build_trend_metrics(df)
     col1, col2, col3 = st.columns(3)
@@ -550,7 +576,8 @@ if not df.empty:
     blocks_df = build_blocks(df)
     st.dataframe(blocks_df, use_container_width=True, hide_index=True)
 else:
-    st.info("Premi 'Aggiorna risultati' per caricare i dati storici del giorno. La predict finale match-by-match userà la logica Top-N coerente con i GG attesi.")
+    st.info("Premi 'Aggiorna risultati' per caricare i dati storici del giorno. Dopo l'1:00, se il giorno è cambiato, l'app esegue il reset automatico quando aggiorni.")
+    st.caption(f"Giorno dati attivo: {st.session_state.get('active_data_day')}")
 
 st.divider()
 st.subheader('Predict finale GG / NG con logica Top-N')
@@ -624,8 +651,10 @@ else:
     st.bar_chart(chart_df, height=320)
 
     with st.expander('Formula predict usata', expanded=False):
+        st.write('Forecast generale prossimo blocco: massimo 10 blocchi, con 60% ultimi 5 blocchi e 40% ultimi 10 blocchi.')
         st.write('Trend squadra = 60% rate ultime 5 giornate + 40% rate ultime 10 giornate.')
         st.write('Trend match = media del trend squadra casa e del trend squadra trasferta.')
         st.write('Score finale = 50% trend match + 25% trend globale + 20% probabilità mercato + 5% bonus classifica.')
         st.write('GG attesi totali = somma degli score finali delle partite inserite.')
         st.write('Predict finale = Top-N del ranking, dove N è il numero arrotondato di GG attesi totali.')
+        st.write("Reset giornaliero: se premi Aggiorna risultati dopo l'1:00 e il giorno è cambiato, lo storico viene azzerato automaticamente.")
