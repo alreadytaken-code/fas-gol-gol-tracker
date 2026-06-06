@@ -3,55 +3,55 @@ import requests
 import pandas as pd
 from datetime import datetime
 
-st.set_page_config(page_title="FAS League Tracker", layout="wide")
+st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
-st.title("FAS League Tracker")
-st.caption("Archivio risultati Sisal con focus GOL / NO GOL")
+st.title('FAS League Tracker')
+st.caption('Archivio risultati Sisal con focus GOL / NO GOL')
 
 
 def infer_gol_gol(result_list):
     for rr in result_list:
-        market = str(rr.get("descrizioneScommessa") or rr.get("modelloScommessa") or "").lower()
-        result = str(rr.get("risultato") or rr.get("descrizioneEsito") or "").lower()
+        market = str(rr.get('descrizioneScommessa') or rr.get('modelloScommessa') or '').lower()
+        result = str(rr.get('risultato') or rr.get('descrizioneEsito') or '').lower()
 
-        if "goal/no goal" in market or "gol/no gol" in market:
-            if "+ goal" in result or result.strip() in ["goal", "gol", "gg"]:
-                return "GOL"
-            if "+ no goal" in result or "+ no gol" in result or result.strip() in ["no goal", "no gol", "nogol", "ng"]:
-                return "NO GOL"
-    return "N/D"
+        if 'goal/no goal' in market or 'gol/no gol' in market:
+            if '+ goal' in result or result.strip() in ['goal', 'gol', 'gg']:
+                return 'GOL'
+            if '+ no goal' in result or '+ no gol' in result or result.strip() in ['no goal', 'no gol', 'nogol', 'ng']:
+                return 'NO GOL'
+    return 'N/D'
 
 
 def get_event_description(ev):
     candidates = [
-        ev.get("descrizioneAvventimento"),
-        ev.get("descrizioneAvvenimento"),
-        ev.get("descrizioneEvento"),
-        ev.get("evento"),
-        ev.get("match"),
-        ev.get("avvenimento"),
-        ev.get("nomeEvento"),
-        ev.get("labelEvento"),
+        ev.get('descrizioneAvventimento'),
+        ev.get('descrizioneAvvenimento'),
+        ev.get('descrizioneEvento'),
+        ev.get('evento'),
+        ev.get('match'),
+        ev.get('avvenimento'),
+        ev.get('nomeEvento'),
+        ev.get('labelEvento'),
     ]
 
     for value in candidates:
-        value = str(value or "").strip()
+        value = str(value or '').strip()
         if value:
-            return value.replace(" ", "")
-    return ""
+            return value.replace(' ', '')
+    return ''
 
 
 def fetch_matches():
-    date_str = datetime.now().strftime("%d-%m-%Y")
-    api_url = f"https://betting.sisal.it/api/vrol-api/vrol/archivio/getArchivioGareCampionato/1/3/6/{date_str}"
+    date_str = datetime.now().strftime('%d-%m-%Y')
+    api_url = f'https://betting.sisal.it/api/vrol-api/vrol/archivio/getArchivioGareCampionato/1/3/6/{date_str}'
 
     r = requests.get(
         api_url,
         timeout=30,
         headers={
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "Referer": "https://www.sisal.it/",
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'application/json',
+            'Referer': 'https://www.sisal.it/',
         },
     )
     r.raise_for_status()
@@ -63,8 +63,8 @@ def fetch_matches():
         return matches
 
     for giornata_block in data:
-        giornata = giornata_block.get("giornata")
-        risultato_map = giornata_block.get("risultatoModelloScommessaCampionatoMap", {})
+        giornata = giornata_block.get('giornata')
+        risultato_map = giornata_block.get('risultatoModelloScommessaCampionatoMap', {})
         if not isinstance(risultato_map, dict):
             continue
 
@@ -73,112 +73,122 @@ def fetch_matches():
                 continue
 
             for model in model_list:
-                eventi = model.get("eventiScommessaList", [])
+                eventi = model.get('eventiScommessaList', [])
                 if not isinstance(eventi, list):
                     continue
 
                 for ev in eventi:
                     desc = get_event_description(ev)
-                    data_ora = str(ev.get("dataOra") or "").strip()
-                    codice_palinsesto = str(ev.get("codicePalinsesto") or "").strip()
-                    codice_avvenimento = str(ev.get("codiceAvvenimento") or "").strip()
+                    data_ora = str(ev.get('dataOra') or '').strip()
+                    codice_palinsesto = str(ev.get('codicePalinsesto') or '').strip()
+                    codice_avvenimento = str(ev.get('codiceAvvenimento') or '').strip()
 
-                    result_list = ev.get("risultatoScommessaUfficialeList", [])
+                    result_list = ev.get('risultatoScommessaUfficialeList', [])
                     if not isinstance(result_list, list):
                         result_list = []
 
                     esito = infer_gol_gol(result_list)
 
                     matches.append({
-                        "match_id": f"{date_str}-{codice_palinsesto}-{codice_avvenimento}",
-                        "timestamp": f"{date_str} {data_ora}",
-                        "orario": data_ora,
-                        "giornata": giornata,
-                        "descrizione_avventimento": desc,
-                        "esito": esito,
+                        'match_id': f'{date_str}-{codice_palinsesto}-{codice_avvenimento}',
+                        'timestamp': f'{date_str} {data_ora}',
+                        'orario': data_ora,
+                        'giornata': giornata,
+                        'codice_avvenimento': codice_avvenimento,
+                        'descrizione_avventimento': desc,
+                        'esito': esito,
                     })
 
     dedup = {}
     for m in matches:
-        dedup[m["match_id"]] = m
+        dedup[m['match_id']] = m
 
     results = list(dedup.values())
-    results.sort(key=lambda x: x["timestamp"], reverse=True)
+    results.sort(key=lambda x: x['timestamp'], reverse=True)
     return results
 
 
 def build_blocks(df):
     if df.empty:
-        return pd.DataFrame(columns=["orario", "GOL", "% sul totale"])
+        return pd.DataFrame(columns=['orario', 'codice_avvenimento', 'GOL', '% sul totale'])
 
-    grouped = df.groupby("orario").agg(
-        totale=("esito", "count"),
-        GOL=("esito", lambda x: (x == "GOL").sum())
+    grouped = df.groupby('orario').agg(
+        codice_avvenimento=('codice_avvenimento', 'first'),
+        totale=('esito', 'count'),
+        GOL=('esito', lambda x: (x == 'GOL').sum())
     ).reset_index()
 
-    grouped["% sul totale"] = ((grouped["GOL"] / grouped["totale"]) * 100).round(2)
-    grouped = grouped.sort_values("orario", ascending=False)
+    grouped['% sul totale'] = ((grouped['GOL'] / grouped['totale']) * 100).round(2)
+    grouped = grouped.sort_values('orario', ascending=False)
 
-    return grouped[["orario", "GOL", "% sul totale"]]
+    return grouped[['orario', 'codice_avvenimento', 'GOL', '% sul totale']]
 
 
-def build_header_stats(df):
-    valid_df = df[df["esito"].isin(["GOL", "NO GOL"])].copy()
+def build_trend_metrics(df):
+    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
     if valid_df.empty:
-        return {
-            "gol_last_20_blocks": 0,
-            "matches_last_20_blocks": 0,
-            "blocks_count": 0,
-        }
+        return {'last5': 0, 'prev5': 0, 'last10': 0, 'prev10': 0, 'latest_block_pct': 0.0}
 
-    recent_blocks = valid_df["orario"].dropna().drop_duplicates().tolist()[:20]
-    filtered = valid_df[valid_df["orario"].isin(recent_blocks)].copy()
+    grouped = valid_df.groupby('orario').agg(
+        totale=('esito', 'count'),
+        gol=('esito', lambda x: (x == 'GOL').sum())
+    ).reset_index().sort_values('orario', ascending=False)
+
+    grouped['pct'] = ((grouped['gol'] / grouped['totale']) * 100).round(2)
+
+    last5 = int(grouped.head(5)['gol'].sum())
+    prev5 = int(grouped.iloc[5:10]['gol'].sum()) if len(grouped) > 5 else 0
+    last10 = int(grouped.head(10)['gol'].sum())
+    prev10 = int(grouped.iloc[10:20]['gol'].sum()) if len(grouped) > 10 else 0
+    latest_block_pct = float(grouped.iloc[0]['pct']) if not grouped.empty else 0.0
 
     return {
-        "gol_last_20_blocks": int((filtered["esito"] == "GOL").sum()),
-        "matches_last_20_blocks": int(len(filtered)),
-        "blocks_count": len(recent_blocks),
+        'last5': last5,
+        'prev5': prev5,
+        'last10': last10,
+        'prev10': prev10,
+        'latest_block_pct': latest_block_pct,
     }
 
 
-if st.button("Aggiorna risultati", type="primary"):
+if st.button('Aggiorna risultati', type='primary'):
     try:
         matches = fetch_matches()
-        st.session_state["matches"] = matches
-        st.session_state["last_update"] = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-        st.success(f"Partite trovate: {len(matches)}")
+        st.session_state['matches'] = matches
+        st.session_state['last_update'] = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
+        st.success(f'Partite trovate: {len(matches)}')
     except Exception as e:
-        st.error(f"Errore API: {e}")
+        st.error(f'Errore API: {e}')
 
-matches = st.session_state.get("matches", [])
-last_update = st.session_state.get("last_update", "-")
+matches = st.session_state.get('matches', [])
+last_update = st.session_state.get('last_update', '-')
 
 if not matches:
     st.info("Premi 'Aggiorna risultati' per caricare i dati.")
     st.stop()
 
 df = pd.DataFrame(matches)
-df = df.sort_values(["orario", "timestamp"], ascending=False)
+df = df.sort_values(['orario', 'timestamp'], ascending=False)
 
-st.markdown(f"**Ultimo aggiornamento:** {last_update}")
+st.markdown(f'**Ultimo aggiornamento:** {last_update}')
 
-header_stats = build_header_stats(df)
+trend = build_trend_metrics(df)
 col1, col2, col3 = st.columns(3)
-col1.metric("GOL negli ultimi 20 blocchi orari", header_stats["gol_last_20_blocks"])
-col2.metric("Partite negli ultimi 20 blocchi", header_stats["matches_last_20_blocks"])
-col3.metric("Blocchi orari considerati", header_stats["blocks_count"])
+col1.metric('GOL ultimi 5 blocchi', trend['last5'], trend['last5'] - trend['prev5'])
+col2.metric('GOL ultimi 10 blocchi', trend['last10'], trend['last10'] - trend['prev10'])
+col3.metric('% GOL ultimo blocco', f"{trend['latest_block_pct']}%")
 
-with st.expander("Storico risultati per blocchi orari", expanded=False):
-    storico_df = df[["orario", "giornata", "descrizione_avventimento", "esito"]].copy()
-    storico_df = storico_df.sort_values(["orario", "giornata"], ascending=[False, False])
+with st.expander('Storico risultati per blocchi orari', expanded=False):
+    storico_df = df[['orario', 'giornata', 'descrizione_avventimento', 'esito']].copy()
+    storico_df = storico_df.sort_values(['orario', 'giornata'], ascending=[False, False])
 
-    orari_unici = storico_df["orario"].dropna().unique().tolist()
+    orari_unici = storico_df['orario'].dropna().unique().tolist()
 
     for i, ora in enumerate(orari_unici):
-        blocco = storico_df[storico_df["orario"] == ora].copy()
-        st.markdown(f"### Blocco {ora}")
+        blocco = storico_df[storico_df['orario'] == ora].copy()
+        st.markdown(f'### Blocco {ora}')
         st.dataframe(
-            blocco[["orario", "giornata", "descrizione_avventimento", "esito"]],
+            blocco[['orario', 'giornata', 'descrizione_avventimento', 'esito']],
             use_container_width=True,
             hide_index=True,
         )
@@ -186,15 +196,15 @@ with st.expander("Storico risultati per blocchi orari", expanded=False):
         if i < len(orari_unici) - 1:
             st.divider()
 
-st.subheader("Blocchi orari")
+st.subheader('Blocchi orari')
 blocks_df = build_blocks(df)
 st.dataframe(blocks_df, use_container_width=True, hide_index=True)
 
 if not blocks_df.empty:
-    st.subheader("Grafico blocchi orari")
-    bar_df = blocks_df.set_index("orario")[["GOL"]]
+    st.subheader('Grafico blocchi orari')
+    bar_df = blocks_df.set_index('orario')[['GOL']]
     st.bar_chart(bar_df, height=320)
 
-    st.subheader("Trend percentuale")
-    trend_df = blocks_df.set_index("orario")[['% sul totale']]
+    st.subheader('Trend percentuale')
+    trend_df = blocks_df.set_index('orario')[['% sul totale']]
     st.line_chart(trend_df, height=280)
