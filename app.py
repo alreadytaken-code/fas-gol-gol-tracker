@@ -292,4 +292,6 @@ st.dataframe(
     hide_index=True
 )
 
-with st.expa
+with st.expander("Debug team names"):
+    debug_df = df[["timestamp", "orario", "match_name", "team_source", "descrizione_avvenimento", "event_name_raw", "debug_event_fields"]].head(50)
+    st.dataframe(debug_df, use_container_width=True, hide_index=True)
