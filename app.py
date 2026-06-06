@@ -9,14 +9,12 @@ import streamlit as st
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('Archivio risultati Sisal con forecast su massimo 10 blocchi, predict Top-N e reset giornaliero dopo l\'1:00 quando premi Aggiorna risultati')
-
-TEAM_NAME_MAP = {
-    'GEN': 'GEN', 'NAP': 'NAP', 'UDI': 'UDI', 'MIL': 'MIL', 'INT': 'INT', 'ROM': 'ROM',
-    'FIO': 'FIO', 'LAZ': 'LAZ', 'SAM': 'SAM', 'ATA': 'ATA', 'VER': 'VER', 'JUV': 'JUV'
-}
+st.caption('Archivio risultati Sisal con forecast blocchi, backtest e ranking GG manuale con trend storico dominante')
 
 
+# -------------------------
+# Storico / API Sisal
+# -------------------------
 def infer_gol_gol(result_list):
     for rr in result_list:
         market = str(rr.get('descrizioneScommessa') or rr.get('modelloScommessa') or '').lower()
@@ -39,23 +37,6 @@ def get_event_description(ev):
         if value:
             return value.replace(' ', '')
     return ''
-
-
-def normalize_match_name(name):
-    name = str(name or '').upper().strip()
-    name = name.replace('-', ' ').replace('_', ' ')
-    name = ' '.join(name.split())
-    return name
-
-
-def split_teams(match_name):
-    cleaned = normalize_match_name(match_name)
-    parts = cleaned.split(' ')
-    if len(parts) >= 2:
-        home = TEAM_NAME_MAP.get(parts[0], parts[0])
-        away = TEAM_NAME_MAP.get(parts[1], parts[1])
-        return home, away
-    return cleaned, ''
 
 
 def fetch_matches():
@@ -83,7 +64,6 @@ def fetch_matches():
                     continue
                 for ev in eventi:
                     desc = get_event_description(ev)
-                    home_team, away_team = split_teams(desc)
                     data_ora = str(ev.get('dataOra') or '').strip()
                     codice_palinsesto = str(ev.get('codicePalinsesto') or '').strip()
                     codice_avvenimento = str(ev.get('codiceAvvenimento') or '').strip()
@@ -98,8 +78,6 @@ def fetch_matches():
                         'giornata': giornata,
                         'codice_avvenimento': codice_avvenimento,
                         'descrizione_avventimento': desc,
-                        'home_team': home_team,
-                        'away_team': away_team,
                         'esito': esito,
                     })
     dedup = {}
@@ -167,7 +145,7 @@ def build_forecast(df):
     valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
     if valid_df.empty:
         return {
-            'rate_5': 0.0, 'rate_10': 0.0, 'weighted_rate': 0.0,
+            'rate_5': 0.0, 'rate_10': 0.0, 'rate_20': 0.0, 'weighted_rate': 0.0,
             'next_block_expected': 0.0, 'next_block_rounded': 0, 'next_3_blocks_expected': 0.0,
             'range_min': 0, 'range_max': 0,
             'details': pd.DataFrame(columns=['finestra', 'percentuale_GG'])
@@ -185,7 +163,8 @@ def build_forecast(df):
 
     rate_5 = mean_rate(5)
     rate_10 = mean_rate(10)
-    weighted_rate = max(0.0, min(1.0, (0.6 * rate_5) + (0.4 * rate_10)))
+    rate_20 = mean_rate(20)
+    weighted_rate = max(0.0, min(1.0, (0.5 * rate_5) + (0.3 * rate_10) + (0.2 * rate_20)))
     next_block_expected = round(weighted_rate * 6, 2)
     next_block_rounded = int(round(next_block_expected))
     next_3_blocks_expected = round(next_block_expected * 3, 2)
@@ -194,10 +173,11 @@ def build_forecast(df):
     details = pd.DataFrame([
         {'finestra': 'Ultimi 5 blocchi', 'percentuale_GG': round(rate_5 * 100, 2)},
         {'finestra': 'Ultimi 10 blocchi', 'percentuale_GG': round(rate_10 * 100, 2)},
+        {'finestra': 'Ultimi 20 blocchi', 'percentuale_GG': round(rate_20 * 100, 2)},
         {'finestra': 'Media pesata finale', 'percentuale_GG': round(weighted_rate * 100, 2)},
     ])
     return {
-        'rate_5': rate_5, 'rate_10': rate_10, 'weighted_rate': weighted_rate,
+        'rate_5': rate_5, 'rate_10': rate_10, 'rate_20': rate_20, 'weighted_rate': weighted_rate,
         'next_block_expected': next_block_expected, 'next_block_rounded': next_block_rounded,
         'next_3_blocks_expected': next_3_blocks_expected, 'range_min': range_min, 'range_max': range_max,
         'details': details
@@ -226,7 +206,8 @@ def build_backtest(df):
 
         rate_5 = mean_rate(5)
         rate_10 = mean_rate(10)
-        weighted_rate = max(0.0, min(1.0, (0.6 * rate_5) + (0.4 * rate_10)))
+        rate_20 = mean_rate(20)
+        weighted_rate = max(0.0, min(1.0, (0.5 * rate_5) + (0.3 * rate_10) + (0.2 * rate_20)))
         predicted = round(weighted_rate * 6, 2)
         actual = int(grouped.iloc[i]['GG'])
         preds.append({
@@ -280,79 +261,9 @@ def build_probabilities(df):
     }
 
 
-def team_recent_form(df, team_code, max_matchdays=10):
-    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy() if not df.empty else pd.DataFrame()
-    if valid_df.empty:
-        return pd.DataFrame(columns=['giornata', 'esito'])
-
-    subset = valid_df[(valid_df['home_team'] == team_code) | (valid_df['away_team'] == team_code)].copy()
-    if subset.empty:
-        return pd.DataFrame(columns=['giornata', 'esito'])
-
-    subset = subset.sort_values(['giornata', 'orario'], ascending=[False, False])
-    unique_days = []
-    for g in subset['giornata'].dropna().tolist():
-        if g not in unique_days:
-            unique_days.append(g)
-    keep_days = unique_days[:max_matchdays]
-    subset = subset[subset['giornata'].isin(keep_days)].copy()
-    subset = subset.drop_duplicates(subset=['giornata', 'home_team', 'away_team', 'esito'])
-    return subset[['giornata', 'esito']]
-
-
-def rate_from_last_matchdays(team_df, n_days):
-    if team_df.empty:
-        return 0.0, 0
-    ordered_days = []
-    for g in team_df['giornata'].dropna().tolist():
-        if g not in ordered_days:
-            ordered_days.append(g)
-    keep_days = ordered_days[:n_days]
-    subset = team_df[team_df['giornata'].isin(keep_days)].copy()
-    matches = len(subset)
-    if matches == 0:
-        return 0.0, 0
-    gg_rate = float((subset['esito'] == 'GOL').sum() / matches)
-    return gg_rate, matches
-
-
-def get_team_trend_5_10(df, team_code):
-    team_df = team_recent_form(df, team_code, max_matchdays=10)
-    rate_5, matches_5 = rate_from_last_matchdays(team_df, 5)
-    rate_10, matches_10 = rate_from_last_matchdays(team_df, 10)
-    trend_score = (0.6 * rate_5) + (0.4 * rate_10)
-    return {
-        'team': team_code,
-        'rate_5': rate_5,
-        'rate_10': rate_10,
-        'trend_score': trend_score,
-        'matches_5': matches_5,
-        'matches_10': matches_10,
-    }
-
-
-def get_global_trend_score(df):
-    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy() if not df.empty else pd.DataFrame()
-    if valid_df.empty:
-        return {'rate_5': 0.0, 'rate_10': 0.0, 'trend_score': 0.0}
-
-    grouped = valid_df.groupby('orario').agg(
-        totale=('esito', 'count'),
-        GG=('esito', lambda x: (x == 'GOL').sum())
-    ).reset_index().sort_values('orario', ascending=False)
-    grouped = grouped[grouped['totale'] > 0].copy()
-    grouped['rate'] = grouped['GG'] / grouped['totale']
-
-    def mean_rate(n):
-        subset = grouped.head(n)
-        return float(subset['rate'].mean()) if not subset.empty else 0.0
-
-    rate_5 = mean_rate(5)
-    rate_10 = mean_rate(10)
-    trend_score = (0.6 * rate_5) + (0.4 * rate_10)
-    return {'rate_5': rate_5, 'rate_10': rate_10, 'trend_score': trend_score}
-
-
+# -------------------------
+# Ranking manuale con trend all'80%
+# -------------------------
 def clean_decimal(val):
     try:
         val = str(val).replace(',', '.').strip()
@@ -365,6 +276,14 @@ def implied_probability_from_odds(odds):
     if odds is None or odds <= 1:
         return None
     return 1 / odds
+
+
+def score_label(score):
+    if score >= 0.62:
+        return 'Alta'
+    if score >= 0.52:
+        return 'Media'
+    return 'Bassa'
 
 
 def ranking_bonus(home_rank, away_rank):
@@ -386,6 +305,51 @@ def ranking_bonus(home_rank, away_rank):
     return bonus
 
 
+def get_current_trend_score(df):
+    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy() if not df.empty else pd.DataFrame()
+    if valid_df.empty:
+        return {
+            'rate_5': 0.0,
+            'rate_10': 0.0,
+            'rate_20': 0.0,
+            'trend_score': 0.0,
+            'momentum_bonus': 0.0,
+            'expected_total_rate': 0.0,
+        }
+
+    grouped = valid_df.groupby('orario').agg(
+        totale=('esito', 'count'),
+        GG=('esito', lambda x: (x == 'GOL').sum())
+    ).reset_index().sort_values('orario', ascending=False)
+    grouped = grouped[grouped['totale'] > 0].copy()
+    grouped['rate'] = grouped['GG'] / grouped['totale']
+
+    def mean_rate(n):
+        subset = grouped.head(n)
+        return float(subset['rate'].mean()) if not subset.empty else 0.0
+
+    rate_5 = mean_rate(5)
+    rate_10 = mean_rate(10)
+    rate_20 = mean_rate(20)
+    trend_score = (0.5 * rate_5) + (0.3 * rate_10) + (0.2 * rate_20)
+
+    momentum_bonus = 0.0
+    if rate_5 > rate_10:
+        momentum_bonus = min(0.03, (rate_5 - rate_10) * 0.25)
+    elif rate_5 < rate_10:
+        momentum_bonus = max(-0.03, (rate_5 - rate_10) * 0.25)
+
+    trend_score = max(0.0, min(1.0, trend_score + momentum_bonus))
+    return {
+        'rate_5': rate_5,
+        'rate_10': rate_10,
+        'rate_20': rate_20,
+        'trend_score': trend_score,
+        'momentum_bonus': momentum_bonus,
+        'expected_total_rate': trend_score,
+    }
+
+
 def parse_text_lines(raw_text):
     rows = []
     pattern = re.compile(r'^(.*?)\s+([0-9]+[\.,][0-9]+)\s+([0-9]{1,2})\s+([0-9]{1,2})$')
@@ -395,12 +359,8 @@ def parse_text_lines(raw_text):
             continue
         m = pattern.match(line)
         if m:
-            match_name = m.group(1)
-            home_team, away_team = split_teams(match_name)
             rows.append({
-                'match': normalize_match_name(match_name),
-                'home_team': home_team,
-                'away_team': away_team,
+                'match': m.group(1),
                 'quota_gg': clean_decimal(m.group(2)),
                 'rank_home': int(m.group(3)),
                 'rank_away': int(m.group(4)),
@@ -408,113 +368,57 @@ def parse_text_lines(raw_text):
     return pd.DataFrame(rows)
 
 
-def build_match_scores(input_df, history_df):
+def build_match_ranking(input_df, trend_info):
     if input_df.empty:
         return pd.DataFrame(columns=[
-            'match', 'home_team', 'away_team', 'quota_gg', 'prob_mercato',
-            'home_rate_5', 'home_rate_10', 'away_rate_5', 'away_rate_10',
-            'team_trend_avg', 'global_trend', 'bonus_classifica', 'score_finale'
+            'match', 'quota_gg', 'prob_mercato', 'trend_score', 'bonus_classifica',
+            'rank_home', 'rank_away', 'score_finale', 'fascia'
         ])
 
-    global_trend = get_global_trend_score(history_df)
-    rows = []
-    for _, r in input_df.iterrows():
-        home_trend = get_team_trend_5_10(history_df, r['home_team'])
-        away_trend = get_team_trend_5_10(history_df, r['away_team'])
-        prob_mercato = implied_probability_from_odds(r['quota_gg']) or 0.0
-        team_trend_avg = (home_trend['trend_score'] + away_trend['trend_score']) / 2
-        bonus_classifica = ranking_bonus(r['rank_home'], r['rank_away'])
-
-        score_finale = (
-            (0.50 * team_trend_avg) +
-            (0.25 * global_trend['trend_score']) +
-            (0.20 * prob_mercato) +
-            (0.05 * bonus_classifica)
-        )
-        score_finale = max(0.0, min(0.95, score_finale))
-
-        rows.append({
-            'match': r['match'],
-            'home_team': r['home_team'],
-            'away_team': r['away_team'],
-            'quota_gg': r['quota_gg'],
-            'prob_mercato': prob_mercato,
-            'home_rate_5': home_trend['rate_5'],
-            'home_rate_10': home_trend['rate_10'],
-            'away_rate_5': away_trend['rate_5'],
-            'away_rate_10': away_trend['rate_10'],
-            'team_trend_avg': team_trend_avg,
-            'global_trend': global_trend['trend_score'],
-            'bonus_classifica': bonus_classifica,
-            'score_finale': score_finale,
-            'home_matches_5': home_trend['matches_5'],
-            'home_matches_10': home_trend['matches_10'],
-            'away_matches_5': away_trend['matches_5'],
-            'away_matches_10': away_trend['matches_10'],
-        })
-
-    return pd.DataFrame(rows).sort_values('score_finale', ascending=False).reset_index(drop=True)
+    df = input_df.copy()
+    df['prob_mercato'] = df['quota_gg'].apply(implied_probability_from_odds)
+    df['bonus_classifica'] = df.apply(lambda r: ranking_bonus(r['rank_home'], r['rank_away']), axis=1)
+    df['trend_score'] = trend_info['trend_score']
+    df['score_finale'] = (
+        (0.80 * df['trend_score']) +
+        (0.15 * df['prob_mercato'].fillna(0)) +
+        (0.05 * df['bonus_classifica'].clip(lower=-0.05, upper=0.05))
+    ).clip(lower=0, upper=0.95)
+    df['fascia'] = df['score_finale'].apply(score_label)
+    df = df.sort_values(['score_finale', 'prob_mercato'], ascending=False)
+    return df[[
+        'match', 'quota_gg', 'prob_mercato', 'trend_score', 'bonus_classifica',
+        'rank_home', 'rank_away', 'score_finale', 'fascia'
+    ]]
 
 
-def assign_topn_predictions(score_df):
-    if score_df.empty:
-        return score_df.copy(), 0.0, 0
-    out = score_df.copy()
-    expected_gg_total = float(out['score_finale'].sum())
-    gg_slots = max(0, min(len(out), int(round(expected_gg_total))))
-    out['prediction'] = 'NG'
-    if gg_slots > 0:
-        out.loc[:gg_slots - 1, 'prediction'] = 'GG'
-    return out, round(expected_gg_total, 2), gg_slots
-
-
-def build_manual_summary(pred_df, expected_gg_total, gg_slots):
-    if pred_df.empty:
+def build_manual_summary(ranking_df):
+    if ranking_df.empty:
         return {
             'matches_count': 0,
             'expected_gg_total': 0.0,
             'expected_gg_rounded': 0,
-            'predicted_gg_count': 0,
-            'predicted_ng_count': 0,
+            'high_band_count': 0,
+            'medium_plus_count': 0,
         }
-    predicted_gg_count = int((pred_df['prediction'] == 'GG').sum())
-    predicted_ng_count = int((pred_df['prediction'] == 'NG').sum())
+    expected_total = float(ranking_df['score_finale'].sum())
     return {
-        'matches_count': int(len(pred_df)),
-        'expected_gg_total': round(expected_gg_total, 2),
-        'expected_gg_rounded': int(gg_slots),
-        'predicted_gg_count': predicted_gg_count,
-        'predicted_ng_count': predicted_ng_count,
+        'matches_count': int(len(ranking_df)),
+        'expected_gg_total': round(expected_total, 2),
+        'expected_gg_rounded': int(round(expected_total)),
+        'high_band_count': int((ranking_df['fascia'] == 'Alta').sum()),
+        'medium_plus_count': int(ranking_df['fascia'].isin(['Alta', 'Media']).sum()),
     }
 
 
-def maybe_reset_daily_after_one():
-    now = datetime.now()
-    today = now.date().isoformat()
-    current_hour = now.hour
-    active_data_day = st.session_state.get('active_data_day')
-
-    if active_data_day is None:
-        st.session_state['active_data_day'] = today
-        return False
-
-    if active_data_day != today and current_hour >= 1:
-        st.session_state['matches'] = []
-        st.session_state['last_update'] = '-'
-        st.session_state['active_data_day'] = today
-        st.session_state['reset_notice'] = f'Reset giornaliero eseguito automaticamente alle {now.strftime("%H:%M:%S")}. '
-        return True
-    return False
-
-
+# -------------------------
+# UI principale storico
+# -------------------------
 if st.button('Aggiorna risultati', type='primary'):
-    did_reset = maybe_reset_daily_after_one()
     try:
         matches = fetch_matches()
         st.session_state['matches'] = matches
         st.session_state['last_update'] = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
-        if did_reset:
-            st.success(st.session_state.get('reset_notice', 'Reset giornaliero eseguito.'))
         st.success(f'Partite trovate: {len(matches)}')
     except Exception as e:
         st.error(f'Errore API: {e}')
@@ -522,14 +426,10 @@ if st.button('Aggiorna risultati', type='primary'):
 matches = st.session_state.get('matches', [])
 last_update = st.session_state.get('last_update', '-')
 
-if 'active_data_day' not in st.session_state:
-    st.session_state['active_data_day'] = datetime.now().date().isoformat()
-
-df = pd.DataFrame(matches) if matches else pd.DataFrame(columns=['orario', 'timestamp', 'esito', 'giornata', 'home_team', 'away_team'])
+df = pd.DataFrame(matches) if matches else pd.DataFrame(columns=['orario', 'timestamp', 'esito'])
 if not df.empty:
     df = df.sort_values(['orario', 'timestamp'], ascending=False)
     st.markdown(f'**Ultimo aggiornamento:** {last_update}')
-    st.caption(f"Giorno dati attivo: {st.session_state.get('active_data_day')}")
 
     trend = build_trend_metrics(df)
     col1, col2, col3 = st.columns(3)
@@ -566,95 +466,115 @@ if not df.empty:
     else:
         st.info(prob['alert_message'])
 
+    with st.expander('Dettaglio backtest', expanded=False):
+        st.dataframe(backtest['table'], use_container_width=True, hide_index=True)
+
     st.subheader('Blocchi con 6 GG su 6')
     all_gg_stats = build_all_gg_stats(df)
     col4, col5 = st.columns(2)
     col4.metric('Totale blocchi 6 su 6', all_gg_stats['total_all_gg_blocks'])
     col5.metric('Serie aperta 6 su 6', all_gg_stats['latest_streak'])
 
+    with st.expander('Dettaglio blocchi 6 GG su 6', expanded=False):
+        st.dataframe(all_gg_stats['blocks_table'], use_container_width=True, hide_index=True)
+
+    with st.expander('Storico risultati per blocchi orari', expanded=False):
+        storico_df = df[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].copy()
+        storico_df = storico_df.sort_values(['orario', 'giornata', 'codice_avvenimento'], ascending=[False, False, False])
+        orari_unici = storico_df['orario'].dropna().unique().tolist()
+        for i, ora in enumerate(orari_unici):
+            blocco = storico_df[storico_df['orario'] == ora].copy()
+            st.markdown(f'### Blocco {ora}')
+            st.dataframe(blocco[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']], use_container_width=True, hide_index=True)
+            if i < len(orari_unici) - 1:
+                st.divider()
+
     st.subheader('Blocchi orari')
     blocks_df = build_blocks(df)
     st.dataframe(blocks_df, use_container_width=True, hide_index=True)
-else:
-    st.info("Premi 'Aggiorna risultati' per caricare i dati storici del giorno. Dopo l'1:00, se il giorno è cambiato, l'app esegue il reset automatico quando aggiorni.")
-    st.caption(f"Giorno dati attivo: {st.session_state.get('active_data_day')}")
 
+    if not blocks_df.empty:
+        st.subheader('Grafico blocchi orari')
+        bar_df = blocks_df.set_index('orario')[['GOL']]
+        st.bar_chart(bar_df, height=320)
+        st.subheader('Trend percentuale')
+        trend_df = blocks_df.set_index('orario')[['% sul totale']]
+        st.line_chart(trend_df, height=280)
+else:
+    st.info("Premi 'Aggiorna risultati' per caricare i dati storici del giorno. Il ranking manuale userà questo trend come motore principale.")
+
+
+# -------------------------
+# UI ranking manuale
+# -------------------------
 st.divider()
-st.subheader('Predict finale GG / NG con logica Top-N')
-st.caption('Formato input: NomePartita quotaGG rankCasa rankTrasferta')
-st.caption('Esempio: INT ROM 1.97 7 9')
+st.subheader('Ranking GG da input manuale con trend storico all\'80%')
+st.caption('Inserisci una riga per partita nel formato: NomePartita quotaGG rankCasa rankTrasferta')
+st.caption('Esempio: Alpha-Beta 1.75 4 6')
+
+trend_info = get_current_trend_score(df)
+t1, t2, t3, t4, t5 = st.columns(5)
+t1.metric('Trend rate ultimi 5', f"{trend_info['rate_5']:.1%}")
+t2.metric('Trend rate ultimi 10', f"{trend_info['rate_10']:.1%}")
+t3.metric('Trend rate ultimi 20', f"{trend_info['rate_20']:.1%}")
+t4.metric('Trend score attivo', f"{trend_info['trend_score']:.1%}")
+t5.metric('Momentum trend', f"{trend_info['momentum_bonus']:.1%}")
 
 raw_text = st.text_area(
     'Inserimento manuale partite',
     height=220,
-    placeholder='GEN NAP 1.98 10 4\nUDI MIL 1.96 2 12\nINT ROM 1.97 7 9'
+    placeholder='Alpha-Beta 1.75 4 6\nGamma-Delta 1.92 8 10\nEpsilon-Zeta 2.05 3 14'
 )
 
-parsed_df = parse_text_lines(raw_text) if raw_text.strip() else pd.DataFrame(columns=['match', 'home_team', 'away_team', 'quota_gg', 'rank_home', 'rank_away'])
+parsed_df = parse_text_lines(raw_text) if raw_text.strip() else pd.DataFrame(columns=['match', 'quota_gg', 'rank_home', 'rank_away'])
 
 if not raw_text.strip():
-    st.info('Inserisci le righe manualmente per ottenere la predict finale completa GG / NG.')
+    st.info('Inserisci le righe manualmente per ottenere il ranking GG con trend storico dominante.')
 elif parsed_df.empty:
-    st.error('Nessuna riga riconosciuta. Usa il formato: NomePartita quotaGG rankCasa rankTrasferta')
+    st.error('Nessuna riga riconosciuta. Controlla il formato: NomePartita quotaGG rankCasa rankTrasferta')
 else:
-    score_df = build_match_scores(parsed_df, df)
-    pred_df, expected_gg_total, gg_slots = assign_topn_predictions(score_df)
-    summary = build_manual_summary(pred_df, expected_gg_total, gg_slots)
-    global_trend = get_global_trend_score(df)
+    ranking_df = build_match_ranking(parsed_df, trend_info)
+    summary = build_manual_summary(ranking_df)
 
-    g1, g2, g3, g4 = st.columns(4)
-    g1.metric('Trend globale 5/10 blocchi', f"{global_trend['trend_score']:.1%}")
-    g2.metric('GG attesi totali', summary['expected_gg_total'])
-    g3.metric('Partite previste GG', summary['predicted_gg_count'])
-    g4.metric('Partite previste NG', summary['predicted_ng_count'])
-    st.caption(f"Logica finale: vengono marcate GG le migliori {summary['expected_gg_rounded']} partite del ranking, coerentemente con i GG attesi totali.")
+    st.markdown('### Sintesi attesa totale')
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric('Partite inserite', summary['matches_count'])
+    s2.metric('GG attesi totali', summary['expected_gg_total'])
+    s3.metric('GG attesi arrotondati', summary['expected_gg_rounded'])
+    s4.metric('Match fascia Alta', summary['high_band_count'])
+    st.caption(f"Match in fascia Alta o Media: {summary['medium_plus_count']}")
 
-    st.markdown('### Predict completa match per match')
-    predict_list = pred_df[['match', 'prediction', 'score_finale']].copy()
-    predict_list['score_finale'] = (predict_list['score_finale'] * 100).round(2)
-    predict_list.columns = ['Match', 'Previsione', 'Score %']
-    st.dataframe(predict_list, use_container_width=True, hide_index=True)
+    st.markdown('### Partite riconosciute')
+    st.dataframe(parsed_df, use_container_width=True, hide_index=True)
 
-    st.markdown('### Elenco secco finale')
-    gg_list = pred_df[pred_df['prediction'] == 'GG']['match'].tolist()
-    ng_list = pred_df[pred_df['prediction'] == 'NG']['match'].tolist()
+    st.markdown('### Ranking finale GG')
+    top1, top2, top3 = st.columns(3)
+    top_row = ranking_df.iloc[0]
+    top1.metric('Top match GG', str(top_row['match']))
+    top2.metric('Score finale top', f"{top_row['score_finale']:.3f}")
+    top3.metric('Probabilità mercato top', f"{top_row['prob_mercato']:.1%}")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown('#### Match previsti GG')
-        if gg_list:
-            for m in gg_list:
-                st.write(f'- {m}')
-        else:
-            st.write('Nessun match previsto GG')
-    with c2:
-        st.markdown('#### Match previsti NG')
-        if ng_list:
-            for m in ng_list:
-                st.write(f'- {m}')
-        else:
-            st.write('Nessun match previsto NG')
-
-    st.markdown('### Tabella tecnica completa')
-    display_df = pred_df.copy()
-    for col in ['prob_mercato', 'home_rate_5', 'home_rate_10', 'away_rate_5', 'away_rate_10', 'team_trend_avg', 'global_trend', 'bonus_classifica', 'score_finale']:
-        display_df[col] = (display_df[col] * 100).round(2)
+    display_df = ranking_df.copy()
+    display_df['prob_mercato'] = (display_df['prob_mercato'] * 100).round(2)
+    display_df['trend_score'] = (display_df['trend_score'] * 100).round(2)
+    display_df['bonus_classifica'] = (display_df['bonus_classifica'] * 100).round(2)
+    display_df['score_finale'] = (display_df['score_finale'] * 100).round(2)
     display_df.columns = [
-        'Match', 'Team casa', 'Team trasferta', 'Quota GG', 'Prob. mercato %',
-        'Casa rate 5g %', 'Casa rate 10g %', 'Trasferta rate 5g %', 'Trasferta rate 10g %',
-        'Trend medio match %', 'Trend globale %', 'Bonus classifica %', 'Score finale %', 'Previsione',
-        'Casa match 5g', 'Casa match 10g', 'Trasferta match 5g', 'Trasferta match 10g'
+        'Match', 'Quota GG', 'Prob. mercato %', 'Trend score %', 'Bonus classifica %',
+        'Rank casa', 'Rank trasferta', 'Score finale %', 'Fascia'
     ]
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-    chart_df = pred_df.set_index('match')[['score_finale']]
+    chart_df = ranking_df.set_index('match')[['score_finale']]
     st.bar_chart(chart_df, height=320)
 
-    with st.expander('Formula predict usata', expanded=False):
-        st.write('Forecast generale prossimo blocco: massimo 10 blocchi, con 60% ultimi 5 blocchi e 40% ultimi 10 blocchi.')
-        st.write('Trend squadra = 60% rate ultime 5 giornate + 40% rate ultime 10 giornate.')
-        st.write('Trend match = media del trend squadra casa e del trend squadra trasferta.')
-        st.write('Score finale = 50% trend match + 25% trend globale + 20% probabilità mercato + 5% bonus classifica.')
+    with st.expander('Formula ranking usata', expanded=False):
+        st.write('Score finale = 80% trend storico + 15% probabilità mercato + 5% bonus classifica.')
+        st.write('Trend storico = 50% rate ultimi 5 blocchi + 30% rate ultimi 10 blocchi + 20% rate ultimi 20 blocchi, con correttivo momentum.')
         st.write('GG attesi totali = somma degli score finali delle partite inserite.')
-        st.write('Predict finale = Top-N del ranking, dove N è il numero arrotondato di GG attesi totali.')
-        st.write("Reset giornaliero: se premi Aggiorna risultati dopo l'1:00 e il giorno è cambiato, lo storico viene azzerato automaticamente.")
+        st.write('Bonus classifica:')
+        st.write('- differenza classifica <= 2: +3%')
+        st.write('- differenza classifica <= 5: +1.5%')
+        st.write('- differenza classifica >= 12: -3%')
+        st.write('- media classifica <= 6: +1%')
+        st.write('- media classifica >= 14: +0.5%')
