@@ -9,7 +9,7 @@ import streamlit as st
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('Archivio risultati Sisal con forecast blocchi, backtest e predict GG/NG finale basata su ranking Top-N coerente con i GG attesi totali')
+st.caption('Archivio risultati Sisal con forecast blocchi, backtest e predict GG/NG finale basata su massimo 10 blocchi e ranking Top-N coerente con i GG attesi totali')
 
 TEAM_NAME_MAP = {
     'GEN': 'GEN', 'NAP': 'NAP', 'UDI': 'UDI', 'MIL': 'MIL', 'INT': 'INT', 'ROM': 'ROM',
@@ -167,7 +167,7 @@ def build_forecast(df):
     valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
     if valid_df.empty:
         return {
-            'rate_5': 0.0, 'rate_10': 0.0, 'rate_20': 0.0, 'weighted_rate': 0.0,
+            'rate_5': 0.0, 'rate_10': 0.0, 'weighted_rate': 0.0,
             'next_block_expected': 0.0, 'next_block_rounded': 0, 'next_3_blocks_expected': 0.0,
             'range_min': 0, 'range_max': 0,
             'details': pd.DataFrame(columns=['finestra', 'percentuale_GG'])
@@ -185,8 +185,7 @@ def build_forecast(df):
 
     rate_5 = mean_rate(5)
     rate_10 = mean_rate(10)
-    rate_20 = mean_rate(20)
-    weighted_rate = max(0.0, min(1.0, (0.5 * rate_5) + (0.3 * rate_10) + (0.2 * rate_20)))
+    weighted_rate = max(0.0, min(1.0, (0.6 * rate_5) + (0.4 * rate_10)))
     next_block_expected = round(weighted_rate * 6, 2)
     next_block_rounded = int(round(next_block_expected))
     next_3_blocks_expected = round(next_block_expected * 3, 2)
@@ -195,11 +194,10 @@ def build_forecast(df):
     details = pd.DataFrame([
         {'finestra': 'Ultimi 5 blocchi', 'percentuale_GG': round(rate_5 * 100, 2)},
         {'finestra': 'Ultimi 10 blocchi', 'percentuale_GG': round(rate_10 * 100, 2)},
-        {'finestra': 'Ultimi 20 blocchi', 'percentuale_GG': round(rate_20 * 100, 2)},
         {'finestra': 'Media pesata finale', 'percentuale_GG': round(weighted_rate * 100, 2)},
     ])
     return {
-        'rate_5': rate_5, 'rate_10': rate_10, 'rate_20': rate_20, 'weighted_rate': weighted_rate,
+        'rate_5': rate_5, 'rate_10': rate_10, 'weighted_rate': weighted_rate,
         'next_block_expected': next_block_expected, 'next_block_rounded': next_block_rounded,
         'next_3_blocks_expected': next_3_blocks_expected, 'range_min': range_min, 'range_max': range_max,
         'details': details
@@ -228,8 +226,7 @@ def build_backtest(df):
 
         rate_5 = mean_rate(5)
         rate_10 = mean_rate(10)
-        rate_20 = mean_rate(20)
-        weighted_rate = max(0.0, min(1.0, (0.5 * rate_5) + (0.3 * rate_10) + (0.2 * rate_20)))
+        weighted_rate = max(0.0, min(1.0, (0.6 * rate_5) + (0.4 * rate_10)))
         predicted = round(weighted_rate * 6, 2)
         actual = int(grouped.iloc[i]['GG'])
         preds.append({
