@@ -30,34 +30,64 @@ def clean_team_name(name):
     return name.title() if name else ""
 
 
-def extract_teams(desc, result_list=None):
-    desc = str(desc or "").strip()
-    desc_clean = desc.replace("–", "-").replace("—", "-")
+def try_extract_from_text(text):
+    text = str(text or "").strip().replace("–", "-").replace("—", "-")
+    if not text:
+        return None
 
-    candidates = [desc_clean]
+    if " - " in text:
+        parts = text.split(" - ", 1)
+    elif "-" in text:
+        parts = text.split("-", 1)
+    else:
+        return None
+
+    home = clean_team_name(parts[0])
+    away = clean_team_name(parts[1])
+    if home and away:
+        return home, away, text
+    return None
+
+
+def extract_teams(ev, result_list=None):
+    candidates = []
+
+    for key in [
+        "descrizioneAvvenimento",
+        "descrizioneEvento",
+        "evento",
+        "match",
+        "avvenimento",
+        "nomeEvento",
+        "labelEvento",
+        "competitor1",
+        "competitor2",
+        "descEvento",
+    ]:
+        if key in ev and ev.get(key):
+            candidates.append((f"ev.{key}", str(ev.get(key))))
 
     if result_list:
-        for rr in result_list:
-            for key in ["descrizioneAvvenimento", "descrizioneEvento", "evento", "match", "avvenimento"]:
-                value = rr.get(key)
-                if value:
-                    candidates.append(str(value).strip().replace("–", "-").replace("—", "-"))
+        for i, rr in enumerate(result_list[:5]):
+            for key in [
+                "descrizioneAvvenimento",
+                "descrizioneEvento",
+                "evento",
+                "match",
+                "avvenimento",
+                "nomeEvento",
+                "labelEvento",
+            ]:
+                if key in rr and rr.get(key):
+                    candidates.append((f"rr[{i}].{key}", str(rr.get(key))))
 
-    for text in candidates:
-        if " - " in text:
-            parts = text.split(" - ", 1)
-            home = clean_team_name(parts[0])
-            away = clean_team_name(parts[1])
-            if home and away:
-                return home, away, text
-        if "-" in text:
-            parts = text.split("-", 1)
-            home = clean_team_name(parts[0])
-            away = clean_team_name(parts[1])
-            if home and away:
-                return home, away, text
+    for source, text in candidates:
+        parsed = try_extract_from_text(text)
+        if parsed:
+            home, away, raw = parsed
+            return home, away, raw, source
 
-    return "Casa", "Trasferta", desc
+    return "Casa", "Trasferta", "", "not_found"
 
 
 def fetch_matches():
@@ -106,7 +136,7 @@ def fetch_matches():
                     if not isinstance(result_list, list):
                         result_list = []
 
-                    home_team, away_team, event_name_raw = extract_teams(desc, result_list)
+                    home_team, away_team, event_name_raw, team_source = extract_teams(ev, result_list)
                     gol_gol = infer_gol_gol(result_list)
 
                     raw_markets = []
@@ -114,6 +144,12 @@ def fetch_matches():
                         market = rr.get("descrizioneScommessa") or rr.get("modelloScommessa") or ""
                         result = rr.get("risultato") or rr.get("descrizioneEsito") or ""
                         raw_markets.append(f"{market}: {result}")
+
+                    debug_event_fields = {
+                        k: ev.get(k)
+                        for k in ev.keys()
+                        if any(token in k.lower() for token in ["desc", "event", "avven", "match", "team", "compet"])
+                    }
 
                     matches.append({
                         "match_id": f"{date_str}-{codice_palinsesto}-{codice_avvenimento}",
@@ -126,9 +162,11 @@ def fetch_matches():
                         "match_name": f"{home_team} - {away_team}",
                         "descrizione_avvenimento": desc,
                         "event_name_raw": event_name_raw,
+                        "team_source": team_source,
                         "gol_gol": gol_gol,
                         "markets_count": len(result_list),
-                        "raw_markets": " | ".join(raw_markets)
+                        "raw_markets": " | ".join(raw_markets),
+                        "debug_event_fields": str(debug_event_fields)
                     })
 
     dedup = {}
@@ -228,28 +266,30 @@ if not valid_df.empty:
 
 st.subheader("Partite uscite GOL GOL (SI)")
 st.dataframe(
-    df[df["gol_gol"] == "SI"][["timestamp", "orario", "match_name", "home_team", "away_team", "gol_gol", "raw_markets"]],
+    df[df["gol_gol"] == "SI"][["timestamp", "orario", "match_name", "home_team", "away_team", "team_source", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
 
 st.subheader("Partite uscite NO GOL GOL (NO)")
 st.dataframe(
-    df[df["gol_gol"] == "NO"][["timestamp", "orario", "match_name", "home_team", "away_team", "gol_gol", "raw_markets"]],
+    df[df["gol_gol"] == "NO"][["timestamp", "orario", "match_name", "home_team", "away_team", "team_source", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
 
 st.subheader("Partite non ancora classificate (N/D)")
 st.dataframe(
-    df[df["gol_gol"] == "N/D"][["timestamp", "orario", "match_name", "home_team", "away_team", "descrizione_avvenimento", "event_name_raw", "gol_gol", "raw_markets"]],
+    df[df["gol_gol"] == "N/D"][["timestamp", "orario", "match_name", "home_team", "away_team", "descrizione_avvenimento", "event_name_raw", "team_source", "gol_gol", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
 
 st.subheader("Storico completo")
 st.dataframe(
-    df[["timestamp", "orario", "giornata", "match_name", "home_team", "away_team", "descrizione_avvenimento", "event_name_raw", "gol_gol", "markets_count", "raw_markets"]],
+    df[["timestamp", "orario", "giornata", "match_name", "home_team", "away_team", "team_source", "descrizione_avvenimento", "event_name_raw", "gol_gol", "markets_count", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
+
+with st.expa
