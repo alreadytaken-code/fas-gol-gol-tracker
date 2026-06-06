@@ -9,7 +9,7 @@ import streamlit as st
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('Archivio risultati Sisal con focus GOL / NO GOL, forecast blocchi e ranking GG da inserimento manuale quote/classifica')
+st.caption('Archivio risultati Sisal con forecast blocchi, backtest e ranking GG manuale con trend storico sempre attivo')
 
 
 # -------------------------
@@ -262,7 +262,7 @@ def build_probabilities(df):
 
 
 # -------------------------
-# Inserimento manuale match
+# Ranking manuale con trend sempre attivo
 # -------------------------
 def clean_decimal(val):
     try:
@@ -305,6 +305,40 @@ def ranking_bonus(home_rank, away_rank):
     return bonus
 
 
+def get_current_trend_score(df):
+    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy() if not df.empty else pd.DataFrame()
+    if valid_df.empty:
+        return {'rate_5': 0.0, 'rate_10': 0.0, 'trend_score': 0.0, 'momentum_bonus': 0.0}
+
+    grouped = valid_df.groupby('orario').agg(
+        totale=('esito', 'count'),
+        GG=('esito', lambda x: (x == 'GOL').sum())
+    ).reset_index().sort_values('orario', ascending=False)
+    grouped = grouped[grouped['totale'] > 0].copy()
+    grouped['rate'] = grouped['GG'] / grouped['totale']
+
+    def mean_rate(n):
+        subset = grouped.head(n)
+        return float(subset['rate'].mean()) if not subset.empty else 0.0
+
+    rate_5 = mean_rate(5)
+    rate_10 = mean_rate(10)
+    trend_score = (0.6 * rate_5) + (0.4 * rate_10)
+    momentum_bonus = 0.0
+    if rate_5 > rate_10:
+        momentum_bonus = min(0.03, (rate_5 - rate_10) * 0.25)
+    elif rate_5 < rate_10:
+        momentum_bonus = max(-0.03, (rate_5 - rate_10) * 0.25)
+
+    trend_score = max(0.0, min(1.0, trend_score + momentum_bonus))
+    return {
+        'rate_5': rate_5,
+        'rate_10': rate_10,
+        'trend_score': trend_score,
+        'momentum_bonus': momentum_bonus,
+    }
+
+
 def parse_text_lines(raw_text):
     rows = []
     pattern = re.compile(r'^(.*?)\s+([0-9]+[\.,][0-9]+)\s+([0-9]{1,2})\s+([0-9]{1,2})$')
@@ -323,16 +357,28 @@ def parse_text_lines(raw_text):
     return pd.DataFrame(rows)
 
 
-def build_match_ranking(input_df):
+def build_match_ranking(input_df, trend_info):
     if input_df.empty:
-        return pd.DataFrame(columns=['match', 'quota_gg', 'prob_implicita_gg', 'rank_home', 'rank_away', 'bonus_classifica', 'score_finale', 'fascia'])
+        return pd.DataFrame(columns=[
+            'match', 'quota_gg', 'prob_mercato', 'trend_score', 'bonus_classifica',
+            'rank_home', 'rank_away', 'score_finale', 'fascia'
+        ])
+
     df = input_df.copy()
-    df['prob_implicita_gg'] = df['quota_gg'].apply(implied_probability_from_odds)
+    df['prob_mercato'] = df['quota_gg'].apply(implied_probability_from_odds)
     df['bonus_classifica'] = df.apply(lambda r: ranking_bonus(r['rank_home'], r['rank_away']), axis=1)
-    df['score_finale'] = (df['prob_implicita_gg'].fillna(0) + df['bonus_classifica']).clip(lower=0, upper=0.95)
+    df['trend_score'] = trend_info['trend_score']
+    df['score_finale'] = (
+        (0.60 * df['prob_mercato'].fillna(0)) +
+        (0.25 * df['trend_score']) +
+        (0.15 * df['bonus_classifica'].clip(lower=-0.05, upper=0.05))
+    ).clip(lower=0, upper=0.95)
     df['fascia'] = df['score_finale'].apply(score_label)
-    df = df.sort_values(['score_finale', 'prob_implicita_gg'], ascending=False)
-    return df[['match', 'quota_gg', 'prob_implicita_gg', 'rank_home', 'rank_away', 'bonus_classifica', 'score_finale', 'fascia']]
+    df = df.sort_values(['score_finale', 'prob_mercato'], ascending=False)
+    return df[[
+        'match', 'quota_gg', 'prob_mercato', 'trend_score', 'bonus_classifica',
+        'rank_home', 'rank_away', 'score_finale', 'fascia'
+    ]]
 
 
 # -------------------------
@@ -350,8 +396,8 @@ if st.button('Aggiorna risultati', type='primary'):
 matches = st.session_state.get('matches', [])
 last_update = st.session_state.get('last_update', '-')
 
-if matches:
-    df = pd.DataFrame(matches)
+df = pd.DataFrame(matches) if matches else pd.DataFrame(columns=['orario', 'timestamp', 'esito'])
+if not df.empty:
     df = df.sort_values(['orario', 'timestamp'], ascending=False)
     st.markdown(f'**Ultimo aggiornamento:** {last_update}')
 
@@ -425,16 +471,23 @@ if matches:
         trend_df = blocks_df.set_index('orario')[['% sul totale']]
         st.line_chart(trend_df, height=280)
 else:
-    st.info("Premi 'Aggiorna risultati' per caricare i dati storici del giorno.")
+    st.info("Premi 'Aggiorna risultati' per caricare i dati storici del giorno. Il ranking manuale userà sempre questo trend se disponibile.")
 
 
 # -------------------------
-# UI manuale quote/classifica
+# UI ranking manuale
 # -------------------------
 st.divider()
-st.subheader('Ranking GG da input manuale')
+st.subheader('Ranking GG da input manuale con trend storico attivo')
 st.caption('Inserisci una riga per partita nel formato: NomePartita quotaGG rankCasa rankTrasferta')
 st.caption('Esempio: Alpha-Beta 1.75 4 6')
+
+trend_info = get_current_trend_score(df)
+t1, t2, t3, t4 = st.columns(4)
+t1.metric('Trend rate ultimi 5', f"{trend_info['rate_5']:.1%}")
+t2.metric('Trend rate ultimi 10', f"{trend_info['rate_10']:.1%}")
+t3.metric('Trend score attivo', f"{trend_info['trend_score']:.1%}")
+t4.metric('Momentum trend', f"{trend_info['momentum_bonus']:.1%}")
 
 raw_text = st.text_area(
     'Inserimento manuale partite',
@@ -445,11 +498,11 @@ raw_text = st.text_area(
 parsed_df = parse_text_lines(raw_text) if raw_text.strip() else pd.DataFrame(columns=['match', 'quota_gg', 'rank_home', 'rank_away'])
 
 if not raw_text.strip():
-    st.info('Inserisci le righe manualmente per ottenere il ranking GG.')
+    st.info('Inserisci le righe manualmente per ottenere il ranking GG con trend storico attivo.')
 elif parsed_df.empty:
     st.error('Nessuna riga riconosciuta. Controlla il formato: NomePartita quotaGG rankCasa rankTrasferta')
 else:
-    ranking_df = build_match_ranking(parsed_df)
+    ranking_df = build_match_ranking(parsed_df, trend_info)
 
     st.markdown('### Partite riconosciute')
     st.dataframe(parsed_df, use_container_width=True, hide_index=True)
@@ -459,23 +512,28 @@ else:
     top_row = ranking_df.iloc[0]
     top1.metric('Top match GG', str(top_row['match']))
     top2.metric('Score finale top', f"{top_row['score_finale']:.3f}")
-    top3.metric('Probabilità implicita top', f"{top_row['prob_implicita_gg']:.1%}")
+    top3.metric('Probabilità mercato top', f"{top_row['prob_mercato']:.1%}")
 
     display_df = ranking_df.copy()
-    display_df['prob_implicita_gg'] = (display_df['prob_implicita_gg'] * 100).round(2)
+    display_df['prob_mercato'] = (display_df['prob_mercato'] * 100).round(2)
+    display_df['trend_score'] = (display_df['trend_score'] * 100).round(2)
     display_df['bonus_classifica'] = (display_df['bonus_classifica'] * 100).round(2)
     display_df['score_finale'] = (display_df['score_finale'] * 100).round(2)
-    display_df.columns = ['Match', 'Quota GG', 'Prob. implicita GG %', 'Rank casa', 'Rank trasferta', 'Bonus classifica %', 'Score finale %', 'Fascia']
+    display_df.columns = [
+        'Match', 'Quota GG', 'Prob. mercato %', 'Trend score %', 'Bonus classifica %',
+        'Rank casa', 'Rank trasferta', 'Score finale %', 'Fascia'
+    ]
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
     chart_df = ranking_df.set_index('match')[['score_finale']]
     st.bar_chart(chart_df, height=320)
 
-    with st.expander('Logica punteggio usata', expanded=False):
-        st.write('Score finale = probabilità implicita dalla quota GG + bonus/malus classifica.')
+    with st.expander('Formula ranking usata', expanded=False):
+        st.write('Score finale = 60% probabilità mercato + 25% trend storico + 15% bonus classifica.')
+        st.write('Trend storico = 60% rate ultimi 5 blocchi + 40% rate ultimi 10 blocchi, con piccolo correttivo momentum.')
+        st.write('Bonus classifica:')
         st.write('- differenza classifica <= 2: +3%')
         st.write('- differenza classifica <= 5: +1.5%')
         st.write('- differenza classifica >= 12: -3%')
         st.write('- media classifica <= 6: +1%')
         st.write('- media classifica >= 14: +0.5%')
-
