@@ -9,7 +9,7 @@ import streamlit as st
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('Archivio risultati Sisal con forecast blocchi, backtest e previsione finale GG/NG per ogni match inserito, usando trend squadra su 5 e 10 giornate')
+st.caption('Archivio risultati Sisal con forecast blocchi, backtest e predict GG/NG finale basata su ranking Top-N coerente con i GG attesi totali')
 
 TEAM_NAME_MAP = {
     'GEN': 'GEN', 'NAP': 'NAP', 'UDI': 'UDI', 'MIL': 'MIL', 'INT': 'INT', 'ROM': 'ROM',
@@ -17,9 +17,6 @@ TEAM_NAME_MAP = {
 }
 
 
-# -------------------------
-# Storico / API Sisal
-# -------------------------
 def infer_gol_gol(result_list):
     for rr in result_list:
         market = str(rr.get('descrizioneScommessa') or rr.get('modelloScommessa') or '').lower()
@@ -286,9 +283,6 @@ def build_probabilities(df):
     }
 
 
-# -------------------------
-# Trend per squadra - 5 e 10 giornate
-# -------------------------
 def team_recent_form(df, team_code, max_matchdays=10):
     valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy() if not df.empty else pd.DataFrame()
     if valid_df.empty:
@@ -395,10 +389,6 @@ def ranking_bonus(home_rank, away_rank):
     return bonus
 
 
-def prediction_from_score(score):
-    return 'GG' if score >= 0.50 else 'NG'
-
-
 def parse_text_lines(raw_text):
     rows = []
     pattern = re.compile(r'^(.*?)\s+([0-9]+[\.,][0-9]+)\s+([0-9]{1,2})\s+([0-9]{1,2})$')
@@ -421,12 +411,12 @@ def parse_text_lines(raw_text):
     return pd.DataFrame(rows)
 
 
-def build_match_predictions(input_df, history_df):
+def build_match_scores(input_df, history_df):
     if input_df.empty:
         return pd.DataFrame(columns=[
             'match', 'home_team', 'away_team', 'quota_gg', 'prob_mercato',
             'home_rate_5', 'home_rate_10', 'away_rate_5', 'away_rate_10',
-            'team_trend_avg', 'global_trend', 'bonus_classifica', 'score_finale', 'prediction'
+            'team_trend_avg', 'global_trend', 'bonus_classifica', 'score_finale'
         ])
 
     global_trend = get_global_trend_score(history_df)
@@ -435,9 +425,7 @@ def build_match_predictions(input_df, history_df):
         home_trend = get_team_trend_5_10(history_df, r['home_team'])
         away_trend = get_team_trend_5_10(history_df, r['away_team'])
         prob_mercato = implied_probability_from_odds(r['quota_gg']) or 0.0
-        team_trend_avg = (
-            home_trend['trend_score'] + away_trend['trend_score']
-        ) / 2
+        team_trend_avg = (home_trend['trend_score'] + away_trend['trend_score']) / 2
         bonus_classifica = ranking_bonus(r['rank_home'], r['rank_away'])
 
         score_finale = (
@@ -447,7 +435,6 @@ def build_match_predictions(input_df, history_df):
             (0.05 * bonus_classifica)
         )
         score_finale = max(0.0, min(0.95, score_finale))
-        prediction = prediction_from_score(score_finale)
 
         rows.append({
             'match': r['match'],
@@ -463,17 +450,28 @@ def build_match_predictions(input_df, history_df):
             'global_trend': global_trend['trend_score'],
             'bonus_classifica': bonus_classifica,
             'score_finale': score_finale,
-            'prediction': prediction,
             'home_matches_5': home_trend['matches_5'],
             'home_matches_10': home_trend['matches_10'],
             'away_matches_5': away_trend['matches_5'],
             'away_matches_10': away_trend['matches_10'],
         })
 
-    return pd.DataFrame(rows).sort_values(['prediction', 'score_finale'], ascending=[False, False])
+    return pd.DataFrame(rows).sort_values('score_finale', ascending=False).reset_index(drop=True)
 
 
-def build_manual_summary(pred_df):
+def assign_topn_predictions(score_df):
+    if score_df.empty:
+        return score_df.copy(), 0.0, 0
+    out = score_df.copy()
+    expected_gg_total = float(out['score_finale'].sum())
+    gg_slots = max(0, min(len(out), int(round(expected_gg_total))))
+    out['prediction'] = 'NG'
+    if gg_slots > 0:
+        out.loc[:gg_slots - 1, 'prediction'] = 'GG'
+    return out, round(expected_gg_total, 2), gg_slots
+
+
+def build_manual_summary(pred_df, expected_gg_total, gg_slots):
     if pred_df.empty:
         return {
             'matches_count': 0,
@@ -482,21 +480,17 @@ def build_manual_summary(pred_df):
             'predicted_gg_count': 0,
             'predicted_ng_count': 0,
         }
-    expected_total = float(pred_df['score_finale'].sum())
     predicted_gg_count = int((pred_df['prediction'] == 'GG').sum())
     predicted_ng_count = int((pred_df['prediction'] == 'NG').sum())
     return {
         'matches_count': int(len(pred_df)),
-        'expected_gg_total': round(expected_total, 2),
-        'expected_gg_rounded': int(round(expected_total)),
+        'expected_gg_total': round(expected_gg_total, 2),
+        'expected_gg_rounded': int(gg_slots),
         'predicted_gg_count': predicted_gg_count,
         'predicted_ng_count': predicted_ng_count,
     }
 
 
-# -------------------------
-# UI storico
-# -------------------------
 if st.button('Aggiorna risultati', type='primary'):
     try:
         matches = fetch_matches()
@@ -559,14 +553,10 @@ if not df.empty:
     blocks_df = build_blocks(df)
     st.dataframe(blocks_df, use_container_width=True, hide_index=True)
 else:
-    st.info("Premi 'Aggiorna risultati' per caricare i dati storici del giorno. Il modello match userà trend squadra su 5 e 10 giornate.")
+    st.info("Premi 'Aggiorna risultati' per caricare i dati storici del giorno. La predict finale match-by-match userà la logica Top-N coerente con i GG attesi.")
 
-
-# -------------------------
-# UI previsione manuale
-# -------------------------
 st.divider()
-st.subheader('Predict finale GG / NG con trend squadra 5 e 10 giornate')
+st.subheader('Predict finale GG / NG con logica Top-N')
 st.caption('Formato input: NomePartita quotaGG rankCasa rankTrasferta')
 st.caption('Esempio: INT ROM 1.97 7 9')
 
@@ -583,8 +573,9 @@ if not raw_text.strip():
 elif parsed_df.empty:
     st.error('Nessuna riga riconosciuta. Usa il formato: NomePartita quotaGG rankCasa rankTrasferta')
 else:
-    pred_df = build_match_predictions(parsed_df, df)
-    summary = build_manual_summary(pred_df)
+    score_df = build_match_scores(parsed_df, df)
+    pred_df, expected_gg_total, gg_slots = assign_topn_predictions(score_df)
+    summary = build_manual_summary(pred_df, expected_gg_total, gg_slots)
     global_trend = get_global_trend_score(df)
 
     g1, g2, g3, g4 = st.columns(4)
@@ -592,6 +583,7 @@ else:
     g2.metric('GG attesi totali', summary['expected_gg_total'])
     g3.metric('Partite previste GG', summary['predicted_gg_count'])
     g4.metric('Partite previste NG', summary['predicted_ng_count'])
+    st.caption(f"Logica finale: vengono marcate GG le migliori {summary['expected_gg_rounded']} partite del ranking, coerentemente con i GG attesi totali.")
 
     st.markdown('### Predict completa match per match')
     predict_list = pred_df[['match', 'prediction', 'score_finale']].copy()
@@ -638,5 +630,5 @@ else:
         st.write('Trend squadra = 60% rate ultime 5 giornate + 40% rate ultime 10 giornate.')
         st.write('Trend match = media del trend squadra casa e del trend squadra trasferta.')
         st.write('Score finale = 50% trend match + 25% trend globale + 20% probabilità mercato + 5% bonus classifica.')
-        st.write('Predict finale: GG se score >= 50%, NG altrimenti.')
         st.write('GG attesi totali = somma degli score finali delle partite inserite.')
+        st.write('Predict finale = Top-N del ranking, dove N è il numero arrotondato di GG attesi totali.')
