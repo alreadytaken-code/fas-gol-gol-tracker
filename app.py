@@ -6,7 +6,7 @@ from datetime import datetime
 st.set_page_config(page_title="FAS League GOL GOL Tracker", layout="wide")
 
 st.title("FAS League GOL GOL Tracker")
-st.caption("Dashboard manuale: clicca il pulsante per recuperare risultati, partite GOL GOL e trend.")
+st.caption("Dashboard manuale: clicca il pulsante per recuperare risultati, partite GOL GOL e trend per blocchi orari.")
 
 
 def infer_gol_gol(result_list):
@@ -45,6 +45,7 @@ def fetch_matches():
         return matches
 
     for giornata_block in data:
+        giornata = giornata_block.get("giornata")
         risultato_map = giornata_block.get("risultatoModelloScommessaCampionatoMap", {})
         if not isinstance(risultato_map, dict):
             continue
@@ -91,7 +92,10 @@ def fetch_matches():
 
                     matches.append({
                         "match_id": f"{date_str}-{codice_palinsesto}-{codice_avvenimento}",
+                        "data": date_str,
+                        "orario": data_ora,
                         "timestamp": f"{date_str} {data_ora}",
+                        "giornata": giornata,
                         "home_team": home_team,
                         "away_team": away_team,
                         "descrizione_avvenimento": desc,
@@ -121,6 +125,31 @@ def build_stats(df, window):
     }
 
 
+def build_time_blocks(df):
+    if df.empty:
+        return pd.DataFrame(columns=["orario", "totale_partite", "gol_gol_si", "gol_gol_no", "non_classificate", "perc_gol_gol"])
+
+    grouped = (
+        df.groupby(["orario", "gol_gol"])
+        .size()
+        .unstack(fill_value=0)
+        .reset_index()
+    )
+
+    for col in ["SI", "NO", "N/D"]:
+        if col not in grouped.columns:
+            grouped[col] = 0
+
+    grouped["totale_partite"] = grouped["SI"] + grouped["NO"] + grouped["N/D"]
+    grouped["gol_gol_si"] = grouped["SI"]
+    grouped["gol_gol_no"] = grouped["NO"]
+    grouped["non_classificate"] = grouped["N/D"]
+    grouped["perc_gol_gol"] = ((grouped["gol_gol_si"] / grouped["totale_partite"]) * 100).round(2)
+
+    grouped = grouped.sort_values("orario", ascending=True)
+    return grouped[["orario", "totale_partite", "gol_gol_si", "gol_gol_no", "non_classificate", "perc_gol_gol"]]
+
+
 if st.button("Aggiorna risultati", type="primary"):
     try:
         matches = fetch_matches()
@@ -147,38 +176,52 @@ c1.metric("GOL GOL ultime 10", f"{stats10['pct']}%", f"{stats10['gg']}/{stats10[
 c2.metric("GOL GOL ultime 25", f"{stats25['pct']}%", f"{stats25['gg']}/{stats25['count']}")
 c3.metric("GOL GOL ultime 50", f"{stats50['pct']}%", f"{stats50['gg']}/{stats50['count']}")
 
+time_blocks = build_time_blocks(df)
+
+st.subheader("Blocchi orari")
+st.dataframe(time_blocks, use_container_width=True, hide_index=True)
+
+if not time_blocks.empty:
+    st.subheader("Grafico per blocchi orari")
+    chart_blocks = time_blocks.set_index("orario")[["gol_gol_si", "gol_gol_no", "non_classificate"]]
+    st.bar_chart(chart_blocks, height=320)
+
+    st.subheader("Trend percentuale GOL GOL per orario")
+    trend_blocks = time_blocks.set_index("orario")[["perc_gol_gol"]]
+    st.line_chart(trend_blocks, height=280)
+
 if not valid_df.empty:
     chart_df = valid_df.copy()
     chart_df = chart_df.iloc[::-1].reset_index(drop=True)
     chart_df["gol_gol_num"] = (chart_df["gol_gol"] == "SI").astype(int)
     chart_df["media_mobile_10"] = chart_df["gol_gol_num"].rolling(10, min_periods=1).mean() * 100
-    st.subheader("Trend GOL GOL")
+    st.subheader("Trend GOL GOL partita per partita")
     st.line_chart(chart_df[["gol_gol_num", "media_mobile_10"]], height=300)
 
 st.subheader("Partite uscite GOL GOL (SI)")
 st.dataframe(
-    df[df["gol_gol"] == "SI"][["timestamp", "home_team", "away_team", "gol_gol", "raw_markets"]],
+    df[df["gol_gol"] == "SI"][["timestamp", "orario", "home_team", "away_team", "gol_gol", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
 
 st.subheader("Partite uscite NO GOL GOL (NO)")
 st.dataframe(
-    df[df["gol_gol"] == "NO"][["timestamp", "home_team", "away_team", "gol_gol", "raw_markets"]],
+    df[df["gol_gol"] == "NO"][["timestamp", "orario", "home_team", "away_team", "gol_gol", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
 
 st.subheader("Partite non ancora classificate (N/D)")
 st.dataframe(
-    df[df["gol_gol"] == "N/D"][["timestamp", "home_team", "away_team", "descrizione_avvenimento", "gol_gol", "raw_markets"]],
+    df[df["gol_gol"] == "N/D"][["timestamp", "orario", "home_team", "away_team", "descrizione_avvenimento", "gol_gol", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
 
 st.subheader("Storico completo")
 st.dataframe(
-    df[["timestamp", "home_team", "away_team", "descrizione_avvenimento", "gol_gol", "markets_count", "raw_markets"]],
+    df[["timestamp", "orario", "giornata", "home_team", "away_team", "descrizione_avvenimento", "gol_gol", "markets_count", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
