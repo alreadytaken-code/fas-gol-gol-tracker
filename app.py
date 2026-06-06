@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
+from math import comb
 
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
@@ -13,7 +14,6 @@ def infer_gol_gol(result_list):
     for rr in result_list:
         market = str(rr.get('descrizioneScommessa') or rr.get('modelloScommessa') or '').lower()
         result = str(rr.get('risultato') or rr.get('descrizioneEsito') or '').lower()
-
         if 'goal/no goal' in market or 'gol/no gol' in market:
             if '+ goal' in result or result.strip() in ['goal', 'gol', 'gg']:
                 return 'GOL'
@@ -24,16 +24,9 @@ def infer_gol_gol(result_list):
 
 def get_event_description(ev):
     candidates = [
-        ev.get('descrizioneAvventimento'),
-        ev.get('descrizioneAvvenimento'),
-        ev.get('descrizioneEvento'),
-        ev.get('evento'),
-        ev.get('match'),
-        ev.get('avvenimento'),
-        ev.get('nomeEvento'),
-        ev.get('labelEvento'),
+        ev.get('descrizioneAvventimento'), ev.get('descrizioneAvvenimento'), ev.get('descrizioneEvento'),
+        ev.get('evento'), ev.get('match'), ev.get('avvenimento'), ev.get('nomeEvento'), ev.get('labelEvento')
     ]
-
     for value in candidates:
         value = str(value or '').strip()
         if value:
@@ -44,51 +37,35 @@ def get_event_description(ev):
 def fetch_matches():
     date_str = datetime.now().strftime('%d-%m-%Y')
     api_url = f'https://betting.sisal.it/api/vrol-api/vrol/archivio/getArchivioGareCampionato/1/3/6/{date_str}'
-
-    r = requests.get(
-        api_url,
-        timeout=30,
-        headers={
-            'User-Agent': 'Mozilla/5.0',
-            'Accept': 'application/json',
-            'Referer': 'https://www.sisal.it/',
-        },
-    )
+    r = requests.get(api_url, timeout=30, headers={
+        'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json', 'Referer': 'https://www.sisal.it/'
+    })
     r.raise_for_status()
     data = r.json()
-
     matches = []
-
     if not isinstance(data, list):
         return matches
-
     for giornata_block in data:
         giornata = giornata_block.get('giornata')
         risultato_map = giornata_block.get('risultatoModelloScommessaCampionatoMap', {})
         if not isinstance(risultato_map, dict):
             continue
-
         for _, model_list in risultato_map.items():
             if not isinstance(model_list, list):
                 continue
-
             for model in model_list:
                 eventi = model.get('eventiScommessaList', [])
                 if not isinstance(eventi, list):
                     continue
-
                 for ev in eventi:
                     desc = get_event_description(ev)
                     data_ora = str(ev.get('dataOra') or '').strip()
                     codice_palinsesto = str(ev.get('codicePalinsesto') or '').strip()
                     codice_avvenimento = str(ev.get('codiceAvvenimento') or '').strip()
-
                     result_list = ev.get('risultatoScommessaUfficialeList', [])
                     if not isinstance(result_list, list):
                         result_list = []
-
                     esito = infer_gol_gol(result_list)
-
                     matches.append({
                         'match_id': f'{date_str}-{codice_palinsesto}-{codice_avvenimento}',
                         'timestamp': f'{date_str} {data_ora}',
@@ -98,11 +75,9 @@ def fetch_matches():
                         'descrizione_avventimento': desc,
                         'esito': esito,
                     })
-
     dedup = {}
     for m in matches:
         dedup[m['match_id']] = m
-
     results = list(dedup.values())
     results.sort(key=lambda x: x['timestamp'], reverse=True)
     return results
@@ -111,16 +86,13 @@ def fetch_matches():
 def build_blocks(df):
     if df.empty:
         return pd.DataFrame(columns=['orario', 'codice_avvenimento', 'GOL', '% sul totale'])
-
     grouped = df.groupby('orario').agg(
         codice_avvenimento=('codice_avvenimento', 'first'),
         totale=('esito', 'count'),
         GOL=('esito', lambda x: (x == 'GOL').sum())
     ).reset_index()
-
     grouped['% sul totale'] = ((grouped['GOL'] / grouped['totale']) * 100).round(2)
     grouped = grouped.sort_values('orario', ascending=False)
-
     return grouped[['orario', 'codice_avvenimento', 'GOL', '% sul totale']]
 
 
@@ -128,52 +100,35 @@ def build_trend_metrics(df):
     valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
     if valid_df.empty:
         return {'last5': 0, 'prev5': 0, 'last10': 0, 'prev10': 0, 'latest_block_pct': 0.0}
-
     grouped = valid_df.groupby('orario').agg(
         totale=('esito', 'count'),
         gol=('esito', lambda x: (x == 'GOL').sum())
     ).reset_index().sort_values('orario', ascending=False)
-
     grouped['pct'] = ((grouped['gol'] / grouped['totale']) * 100).round(2)
-
-    last5 = int(grouped.head(5)['gol'].sum())
-    prev5 = int(grouped.iloc[5:10]['gol'].sum()) if len(grouped) > 5 else 0
-    last10 = int(grouped.head(10)['gol'].sum())
-    prev10 = int(grouped.iloc[10:20]['gol'].sum()) if len(grouped) > 10 else 0
-    latest_block_pct = float(grouped.iloc[0]['pct']) if not grouped.empty else 0.0
-
     return {
-        'last5': last5,
-        'prev5': prev5,
-        'last10': last10,
-        'prev10': prev10,
-        'latest_block_pct': latest_block_pct,
+        'last5': int(grouped.head(5)['gol'].sum()),
+        'prev5': int(grouped.iloc[5:10]['gol'].sum()) if len(grouped) > 5 else 0,
+        'last10': int(grouped.head(10)['gol'].sum()),
+        'prev10': int(grouped.iloc[10:20]['gol'].sum()) if len(grouped) > 10 else 0,
+        'latest_block_pct': float(grouped.iloc[0]['pct']) if not grouped.empty else 0.0,
     }
 
 
 def build_all_gg_stats(df):
     valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
     if valid_df.empty:
-        return {
-            'total_all_gg_blocks': 0,
-            'latest_streak': 0,
-            'blocks_table': pd.DataFrame(columns=['orario', 'GG', 'totale', 'all_gg_6su6'])
-        }
-
+        return {'total_all_gg_blocks': 0, 'latest_streak': 0, 'blocks_table': pd.DataFrame(columns=['orario', 'GG', 'totale', 'all_gg_6su6'])}
     grouped = valid_df.groupby('orario').agg(
         totale=('esito', 'count'),
         GG=('esito', lambda x: (x == 'GOL').sum())
     ).reset_index().sort_values('orario', ascending=False)
-
     grouped['all_gg_6su6'] = (grouped['totale'] == 6) & (grouped['GG'] == 6)
-
     streak = 0
     for value in grouped['all_gg_6su6'].tolist():
         if value:
             streak += 1
         else:
             break
-
     return {
         'total_all_gg_blocks': int(grouped['all_gg_6su6'].sum()),
         'latest_streak': streak,
@@ -185,140 +140,101 @@ def build_forecast(df):
     valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
     if valid_df.empty:
         return {
-            'rate_5': 0.0,
-            'rate_10': 0.0,
-            'rate_20': 0.0,
-            'weighted_rate': 0.0,
-            'next_block_expected': 0.0,
-            'next_block_rounded': 0,
-            'next_3_blocks_expected': 0.0,
-            'range_min': 0,
-            'range_max': 0,
+            'rate_5': 0.0, 'rate_10': 0.0, 'rate_20': 0.0, 'weighted_rate': 0.0,
+            'next_block_expected': 0.0, 'next_block_rounded': 0, 'next_3_blocks_expected': 0.0,
+            'range_min': 0, 'range_max': 0,
             'details': pd.DataFrame(columns=['finestra', 'percentuale_GG'])
         }
-
     grouped = valid_df.groupby('orario').agg(
         totale=('esito', 'count'),
         GG=('esito', lambda x: (x == 'GOL').sum())
     ).reset_index().sort_values('orario', ascending=False)
-
     grouped = grouped[grouped['totale'] > 0].copy()
     grouped['rate'] = grouped['GG'] / grouped['totale']
 
     def mean_rate(n):
         subset = grouped.head(n)
-        if subset.empty:
-            return 0.0
-        return float(subset['rate'].mean())
+        return float(subset['rate'].mean()) if not subset.empty else 0.0
 
     rate_5 = mean_rate(5)
     rate_10 = mean_rate(10)
     rate_20 = mean_rate(20)
-
-    weighted_rate = (0.5 * rate_5) + (0.3 * rate_10) + (0.2 * rate_20)
-    weighted_rate = max(0.0, min(1.0, weighted_rate))
-
-    matches_per_block = 6
-    next_block_expected = round(weighted_rate * matches_per_block, 2)
+    weighted_rate = max(0.0, min(1.0, (0.5 * rate_5) + (0.3 * rate_10) + (0.2 * rate_20)))
+    next_block_expected = round(weighted_rate * 6, 2)
     next_block_rounded = int(round(next_block_expected))
     next_3_blocks_expected = round(next_block_expected * 3, 2)
-
     range_min = max(0, int(round(next_block_expected - 1)))
-    range_max = min(matches_per_block, int(round(next_block_expected + 1)))
-
+    range_max = min(6, int(round(next_block_expected + 1)))
     details = pd.DataFrame([
         {'finestra': 'Ultimi 5 blocchi', 'percentuale_GG': round(rate_5 * 100, 2)},
         {'finestra': 'Ultimi 10 blocchi', 'percentuale_GG': round(rate_10 * 100, 2)},
         {'finestra': 'Ultimi 20 blocchi', 'percentuale_GG': round(rate_20 * 100, 2)},
         {'finestra': 'Media pesata finale', 'percentuale_GG': round(weighted_rate * 100, 2)},
     ])
-
     return {
-        'rate_5': rate_5,
-        'rate_10': rate_10,
-        'rate_20': rate_20,
-        'weighted_rate': weighted_rate,
-        'next_block_expected': next_block_expected,
-        'next_block_rounded': next_block_rounded,
-        'next_3_blocks_expected': next_3_blocks_expected,
-        'range_min': range_min,
-        'range_max': range_max,
+        'rate_5': rate_5, 'rate_10': rate_10, 'rate_20': rate_20, 'weighted_rate': weighted_rate,
+        'next_block_expected': next_block_expected, 'next_block_rounded': next_block_rounded,
+        'next_3_blocks_expected': next_3_blocks_expected, 'range_min': range_min, 'range_max': range_max,
         'details': details
     }
 
 
-if st.button('Aggiorna risultati', type='primary'):
-    try:
-        matches = fetch_matches()
-        st.session_state['matches'] = matches
-        st.session_state['last_update'] = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
-        st.success(f'Partite trovate: {len(matches)}')
-    except Exception as e:
-        st.error(f'Errore API: {e}')
+def build_backtest(df):
+    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
+    cols = ['orario', 'actual_GG', 'predicted_GG', 'error']
+    empty = pd.DataFrame(columns=cols)
+    if valid_df.empty:
+        return {'mae_10': 0.0, 'mae_20': 0.0, 'bias': 0.0, 'table': empty}
+    grouped = valid_df.groupby('orario').agg(
+        totale=('esito', 'count'),
+        GG=('esito', lambda x: (x == 'GOL').sum())
+    ).reset_index().sort_values('orario', ascending=True)
+    grouped = grouped[grouped['totale'] > 0].copy()
+    grouped['rate'] = grouped['GG'] / grouped['totale']
+    preds = []
+    for i in range(1, len(grouped)):
+        hist = grouped.iloc[:i]
+        def mean_rate(n):
+            sub = hist.tail(n)
+            return float(sub['rate'].mean()) if not sub.empty else 0.0
+        rate_5 = mean_rate(5)
+        rate_10 = mean_rate(10)
+        rate_20 = mean_rate(20)
+        weighted_rate = max(0.0, min(1.0, (0.5 * rate_5) + (0.3 * rate_10) + (0.2 * rate_20)))
+        predicted = round(weighted_rate * 6, 2)
+        actual = int(grouped.iloc[i]['GG'])
+        preds.append({
+            'orario': grouped.iloc[i]['orario'],
+            'actual_GG': actual,
+            'predicted_GG': predicted,
+            'error': round(predicted - actual, 2),
+            'abs_error': round(abs(predicted - actual), 2),
+        })
+    if not preds:
+        return {'mae_10': 0.0, 'mae_20': 0.0, 'bias': 0.0, 'table': empty}
+    backtest_df = pd.DataFrame(preds).sort_values('orario', ascending=False)
+    return {
+        'mae_10': round(float(backtest_df.head(10)['abs_error'].mean()), 2),
+        'mae_20': round(float(backtest_df.head(20)['abs_error'].mean()), 2),
+        'bias': round(float(backtest_df['error'].mean()), 2),
+        'table': backtest_df[['orario', 'actual_GG', 'predicted_GG', 'error']]
+    }
 
-matches = st.session_state.get('matches', [])
-last_update = st.session_state.get('last_update', '-')
 
-if not matches:
-    st.info("Premi 'Aggiorna risultati' per caricare i dati.")
-    st.stop()
+def build_probabilities(df):
+    forecast = build_forecast(df)
+    p = forecast['weighted_rate']
 
-df = pd.DataFrame(matches)
-df = df.sort_values(['orario', 'timestamp'], ascending=False)
+    def binom_prob_at_least(k, n=6, p=0.0):
+        return sum(comb(n, i) * (p ** i) * ((1 - p) ** (n - i)) for i in range(k, n + 1))
 
-st.markdown(f'**Ultimo aggiornamento:** {last_update}')
+    p_ge4 = binom_prob_at_least(4, 6, p)
+    p_ge5 = binom_prob_at_least(5, 6, p)
+    p_eq6 = p ** 6
+    p_ge4_3blocks = 1 - ((1 - p_ge4) ** 3)
 
-trend = build_trend_metrics(df)
-col1, col2, col3 = st.columns(3)
-col1.metric('Partite GG ultimi 5 blocchi', trend['last5'], trend['last5'] - trend['prev5'])
-col2.metric('Partite GG ultimi 10 blocchi', trend['last10'], trend['last10'] - trend['prev10'])
-col3.metric('% partite GG ultimo blocco', f"{trend['latest_block_pct']}%")
-
-st.subheader('Previsione prossimi blocchi')
-forecast = build_forecast(df)
-fc1, fc2, fc3 = st.columns(3)
-fc1.metric('GG attesi prossimo blocco', forecast['next_block_expected'])
-fc2.metric('Stima arrotondata prossimo blocco', forecast['next_block_rounded'])
-fc3.metric('GG attesi prossimi 3 blocchi', forecast['next_3_blocks_expected'])
-st.caption(f"Range stimato prossimo blocco: {forecast['range_min']} - {forecast['range_max']} GG")
-st.dataframe(forecast['details'], use_container_width=True, hide_index=True)
-
-st.subheader('Blocchi con 6 GG su 6')
-all_gg_stats = build_all_gg_stats(df)
-col4, col5 = st.columns(2)
-col4.metric('Totale blocchi 6 su 6', all_gg_stats['total_all_gg_blocks'])
-col5.metric('Serie aperta 6 su 6', all_gg_stats['latest_streak'])
-
-with st.expander('Dettaglio blocchi 6 GG su 6', expanded=False):
-    st.dataframe(all_gg_stats['blocks_table'], use_container_width=True, hide_index=True)
-
-with st.expander('Storico risultati per blocchi orari', expanded=False):
-    storico_df = df[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].copy()
-    storico_df = storico_df.sort_values(['orario', 'giornata', 'codice_avvenimento'], ascending=[False, False, False])
-
-    orari_unici = storico_df['orario'].dropna().unique().tolist()
-
-    for i, ora in enumerate(orari_unici):
-        blocco = storico_df[storico_df['orario'] == ora].copy()
-        st.markdown(f'### Blocco {ora}')
-        st.dataframe(
-            blocco[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']],
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        if i < len(orari_unici) - 1:
-            st.divider()
-
-st.subheader('Blocchi orari')
-blocks_df = build_blocks(df)
-st.dataframe(blocks_df, use_container_width=True, hide_index=True)
-
-if not blocks_df.empty:
-    st.subheader('Grafico blocchi orari')
-    bar_df = blocks_df.set_index('orario')[['GOL']]
-    st.bar_chart(bar_df, height=320)
-
-    st.subheader('Trend percentuale')
-    trend_df = blocks_df.set_index('orario')[['% sul totale']]
-    st.line_chart(trend_df, height=280)
+    alert_level = 'low'
+    if forecast['next_block_expected'] >= 4.5 or p_eq6 >= 0.12:
+        alert_level = 'high'
+    elif forecast['next_block_expected'] >= 3.8 or p_ge4 >= 0.55:
+        alert_
