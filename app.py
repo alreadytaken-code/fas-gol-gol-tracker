@@ -9,41 +9,6 @@ st.set_page_config(page_title="FAS League GOL GOL Tracker", layout="wide")
 st.title("FAS League GOL GOL Tracker")
 st.caption("Dashboard manuale: clicca il pulsante per recuperare risultati, partite GOL GOL e trend per blocchi orari.")
 
-TEAM_MAP = {
-    "JUV": "Juve",
-    "UDI": "Udinese",
-    "INT": "Inter",
-    "ROM": "Roma",
-    "NAP": "Napoli",
-    "VER": "Verona",
-    "ATA": "Atalanta",
-    "GEN": "Genoa",
-    "LAZ": "Lazio",
-    "MIL": "Milan",
-    "SAM": "Sampdoria",
-    "FIO": "Fiorentina",
-    "TOR": "Torino",
-    "BOL": "Bologna",
-    "PAR": "Parma",
-    "SAS": "Sassuolo",
-    "EMP": "Empoli",
-    "MON": "Monza",
-    "LEC": "Lecce",
-    "SAL": "Salernitana",
-    "CAG": "Cagliari",
-    "PAL": "Palermo",
-    "PIS": "Pisa",
-    "COM": "Como",
-    "CRE": "Cremonese",
-    "SPE": "Spezia",
-    "BEN": "Benevento",
-    "ASC": "Ascoli",
-    "BAR": "Bari",
-    "REG": "Reggina",
-    "PER": "Perugia",
-    "CAT": "Catanzaro",
-}
-
 
 def infer_gol_gol(result_list):
     for rr in result_list:
@@ -58,13 +23,29 @@ def infer_gol_gol(result_list):
     return "N/D"
 
 
-def map_team(sigla):
-    sigla = str(sigla or "").strip().upper()
-    sigla = re.sub(r"[^A-Z]", "", sigla)
-    if sigla in TEAM_MAP:
-        return TEAM_MAP[sigla]
-    if sigla:
-        return sigla.title()
+def clean_team_sigla(value):
+    value = str(value or "").strip().upper()
+    value = value.replace("–", "-").replace("—", "-")
+    value = re.sub(r"[^A-Z]", "", value)
+    return value
+
+
+def get_event_description(ev):
+    candidates = [
+        ev.get("descrizioneAvvenimento"),
+        ev.get("descrizioneEvento"),
+        ev.get("evento"),
+        ev.get("match"),
+        ev.get("avvenimento"),
+        ev.get("nomeEvento"),
+        ev.get("labelEvento"),
+    ]
+
+    for value in candidates:
+        value = str(value or "").strip()
+        if value:
+            return value
+
     return ""
 
 
@@ -77,15 +58,15 @@ def parse_match_name(desc):
     elif "-" in text:
         left, right = text.split("-", 1)
     else:
-        return "Casa", "Trasferta", text
+        return "CASA", "TRASFERTA", text
 
-    home_team = map_team(left)
-    away_team = map_team(right)
+    home_team = clean_team_sigla(left)
+    away_team = clean_team_sigla(right)
 
     if not home_team:
-        home_team = "Casa"
+        home_team = "CASA"
     if not away_team:
-        away_team = "Trasferta"
+        away_team = "TRASFERTA"
 
     return home_team, away_team, text
 
@@ -127,7 +108,7 @@ def fetch_matches():
                     continue
 
                 for ev in eventi:
-                    desc = str(ev.get("descrizioneAvvenimento") or "").strip()
+                    desc = get_event_description(ev)
                     data_ora = str(ev.get("dataOra") or "").strip()
                     codice_palinsesto = str(ev.get("codicePalinsesto") or "").strip()
                     codice_avvenimento = str(ev.get("codiceAvvenimento") or "").strip()
@@ -153,7 +134,7 @@ def fetch_matches():
                         "giornata": giornata,
                         "home_team": home_team,
                         "away_team": away_team,
-                        "match_name": f"{home_team} - {away_team}",
+                        "match_name": f"{home_team}-{away_team}",
                         "descrizione_avvenimento": raw_desc,
                         "gol_gol": gol_gol,
                         "markets_count": len(result_list),
