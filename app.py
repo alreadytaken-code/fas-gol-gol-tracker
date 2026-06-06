@@ -151,6 +151,36 @@ def build_trend_metrics(df):
     }
 
 
+def build_all_gg_stats(df):
+    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
+    if valid_df.empty:
+        return {
+            'total_all_gg_blocks': 0,
+            'latest_streak': 0,
+            'blocks_table': pd.DataFrame(columns=['orario', 'GG', 'totale', 'all_gg_6su6'])
+        }
+
+    grouped = valid_df.groupby('orario').agg(
+        totale=('esito', 'count'),
+        GG=('esito', lambda x: (x == 'GOL').sum())
+    ).reset_index().sort_values('orario', ascending=False)
+
+    grouped['all_gg_6su6'] = (grouped['totale'] == 6) & (grouped['GG'] == 6)
+
+    streak = 0
+    for value in grouped['all_gg_6su6'].tolist():
+        if value:
+            streak += 1
+        else:
+            break
+
+    return {
+        'total_all_gg_blocks': int(grouped['all_gg_6su6'].sum()),
+        'latest_streak': streak,
+        'blocks_table': grouped[['orario', 'GG', 'totale', 'all_gg_6su6']]
+    }
+
+
 if st.button('Aggiorna risultati', type='primary'):
     try:
         matches = fetch_matches()
@@ -177,6 +207,15 @@ col1, col2, col3 = st.columns(3)
 col1.metric('Partite GG ultimi 5 blocchi', trend['last5'], trend['last5'] - trend['prev5'])
 col2.metric('Partite GG ultimi 10 blocchi', trend['last10'], trend['last10'] - trend['prev10'])
 col3.metric('% partite GG ultimo blocco', f"{trend['latest_block_pct']}%")
+
+st.subheader('Blocchi con 6 GG su 6')
+all_gg_stats = build_all_gg_stats(df)
+col4, col5 = st.columns(2)
+col4.metric('Totale blocchi 6 su 6', all_gg_stats['total_all_gg_blocks'])
+col5.metric('Serie aperta 6 su 6', all_gg_stats['latest_streak'])
+
+with st.expander('Dettaglio blocchi 6 GG su 6', expanded=False):
+    st.dataframe(all_gg_stats['blocks_table'], use_container_width=True, hide_index=True)
 
 with st.expander('Storico risultati per blocchi orari', expanded=False):
     storico_df = df[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].copy()
