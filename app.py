@@ -14,10 +14,10 @@ def infer_gol_gol(result_list):
         market = str(rr.get("descrizioneScommessa") or rr.get("modelloScommessa") or "").lower()
         result = str(rr.get("risultato") or rr.get("descrizioneEsito") or "").lower()
 
-        if "gol" in market:
-            if result in ["gol", "goal", "gg"]:
+        if "goal/no goal" in market or "gol/no gol" in market:
+            if "+ goal" in result or result.strip() in ["goal", "gol", "gg"]:
                 return "SI"
-            if result in ["no gol", "nogol", "ng"]:
+            if "+ no goal" in result or "+ no gol" in result or result.strip() in ["no goal", "no gol", "nogol", "ng"]:
                 return "NO"
 
     return "N/D"
@@ -49,7 +49,7 @@ def fetch_matches():
         if not isinstance(risultato_map, dict):
             continue
 
-        for key, model_list in risultato_map.items():
+        for _, model_list in risultato_map.items():
             if not isinstance(model_list, list):
                 continue
 
@@ -66,10 +66,16 @@ def fetch_matches():
 
                     home_team = "Casa"
                     away_team = "Trasferta"
-                    if " - " in desc:
-                        parts = desc.split(" - ", 1)
-                        home_team = parts[0].strip()
-                        away_team = parts[1].strip()
+                    desc_clean = desc.replace("–", "-").replace("—", "-").strip()
+
+                    if " - " in desc_clean:
+                        parts = desc_clean.split(" - ", 1)
+                        home_team = parts[0].strip() or "Casa"
+                        away_team = parts[1].strip() or "Trasferta"
+                    elif "-" in desc_clean:
+                        parts = desc_clean.split("-", 1)
+                        home_team = parts[0].strip() or "Casa"
+                        away_team = parts[1].strip() or "Trasferta"
 
                     result_list = ev.get("risultatoScommessaUfficialeList", [])
                     if not isinstance(result_list, list):
@@ -88,12 +94,12 @@ def fetch_matches():
                         "timestamp": f"{date_str} {data_ora}",
                         "home_team": home_team,
                         "away_team": away_team,
+                        "descrizione_avvenimento": desc,
                         "gol_gol": gol_gol,
                         "markets_count": len(result_list),
                         "raw_markets": " | ".join(raw_markets)
                     })
 
-    # dedup
     dedup = {}
     for m in matches:
         dedup[m["match_id"]] = m
@@ -165,14 +171,14 @@ st.dataframe(
 
 st.subheader("Partite non ancora classificate (N/D)")
 st.dataframe(
-    df[df["gol_gol"] == "N/D"][["timestamp", "home_team", "away_team", "gol_gol", "raw_markets"]],
+    df[df["gol_gol"] == "N/D"][["timestamp", "home_team", "away_team", "descrizione_avvenimento", "gol_gol", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
 
 st.subheader("Storico completo")
 st.dataframe(
-    df[["timestamp", "home_team", "away_team", "gol_gol", "markets_count", "raw_markets"]],
+    df[["timestamp", "home_team", "away_team", "descrizione_avvenimento", "gol_gol", "markets_count", "raw_markets"]],
     use_container_width=True,
     hide_index=True
 )
