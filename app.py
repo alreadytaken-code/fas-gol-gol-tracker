@@ -830,21 +830,6 @@ if not df.empty:
     else:
         st.info('Nessun dato disponibile.')
 
-    giornata_summary = build_giornata_summary(df)
-    gcol3, gcol4 = st.columns(2)
-    with gcol3:
-        st.markdown('#### GG per blocco')
-        if not giornata_summary.empty:
-            st.bar_chart(giornata_summary.set_index('group_label')[['GG']], height=280)
-        else:
-            st.info('Nessun dato disponibile.')
-    with gcol4:
-        st.markdown('#### % GG per blocco')
-        if not giornata_summary.empty:
-            st.line_chart(giornata_summary.set_index('group_label')[['pct_gg']], height=280)
-        else:
-            st.info('Nessun dato disponibile.')
-
     st.subheader('Backtest e probabilità')
     backtest = build_backtest(df)
     prob = build_probabilities(df)
@@ -877,39 +862,39 @@ if not df.empty:
     with st.expander('Dettaglio blocchi 6 GG su 6', expanded=False):
         st.dataframe(all_gg_stats['blocks_table'], use_container_width=True, hide_index=True)
 
-    st.subheader('Partite giorno per giorno')
-    storico_df = ensure_block_columns(df)[[
-        'cycle_id', 'giornata', 'group_label', 'match_nel_blocco', 'orario',
-        'codice_avvenimento', 'descrizione_avventimento', 'esito', 'group_key', 'sort_timestamp'
-    ]].copy()
+    with st.expander('Partite giorno per giorno', expanded=False):
+        storico_df = ensure_block_columns(df)[[
+            'cycle_id', 'giornata', 'group_label', 'match_nel_blocco', 'orario',
+            'codice_avvenimento', 'descrizione_avventimento', 'esito', 'group_key', 'sort_timestamp'
+        ]].copy()
 
-    block_order = (
-        storico_df.groupby('group_key', dropna=False)
-        .agg(last_ts=('sort_timestamp', 'max'), group_label=('group_label', 'first'))
-        .reset_index(drop=True)
-        .sort_values('last_ts', ascending=False, kind='stable')
-    )
-    ordered_labels = block_order['group_label'].tolist()
+        block_order = (
+            storico_df.groupby('group_key', dropna=False)
+            .agg(last_ts=('sort_timestamp', 'max'), group_label=('group_label', 'first'))
+            .reset_index(drop=True)
+            .sort_values('last_ts', ascending=False, kind='stable')
+        )
+        ordered_labels = block_order['group_label'].tolist()
 
-    if ordered_labels:
-        for label in ordered_labels:
-            blocco_g = storico_df[storico_df['group_label'] == label].copy()
-            blocco_g = blocco_g.sort_values(['match_nel_blocco', 'orario', 'codice_avvenimento'], ascending=[True, True, True], kind='stable').reset_index(drop=True)
-            gg_count = int((blocco_g['esito'] == 'GOL').sum())
-            ng_count = int((blocco_g['esito'] == 'NO GOL').sum())
-            giornata_value = int(blocco_g['giornata'].iloc[0]) if not blocco_g.empty else 0
-            ciclo_value = int(blocco_g['cycle_id'].iloc[0]) if not blocco_g.empty else 0
-            with st.expander(
-                f'Giornata {giornata_value} · Ciclo {ciclo_value} · Partite {len(blocco_g)} · GG {gg_count} · NG {ng_count}',
-                expanded=False
-            ):
-                st.dataframe(
-                    blocco_g[['match_nel_blocco', 'orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].rename(columns={'match_nel_blocco': 'n_match'}),
-                    use_container_width=True,
-                    hide_index=True
-                )
-    else:
-        st.info('Nessun blocco disponibile.')
+        if ordered_labels:
+            for label in ordered_labels:
+                blocco_g = storico_df[storico_df['group_label'] == label].copy()
+                blocco_g = blocco_g.sort_values(['match_nel_blocco', 'orario', 'codice_avvenimento'], ascending=[True, True, True], kind='stable').reset_index(drop=True)
+                gg_count = int((blocco_g['esito'] == 'GOL').sum())
+                ng_count = int((blocco_g['esito'] == 'NO GOL').sum())
+                giornata_value = int(blocco_g['giornata'].iloc[0]) if not blocco_g.empty else 0
+                ciclo_value = int(blocco_g['cycle_id'].iloc[0]) if not blocco_g.empty else 0
+                with st.expander(
+                    f'Giornata {giornata_value} · Ciclo {ciclo_value} · Partite {len(blocco_g)} · GG {gg_count} · NG {ng_count}',
+                    expanded=False
+                ):
+                    st.dataframe(
+                        blocco_g[['match_nel_blocco', 'orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].rename(columns={'match_nel_blocco': 'n_match'}),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+        else:
+            st.info('Nessun blocco disponibile.')
 
     st.subheader('Blocchi Sisal distinti')
     st.dataframe(build_blocks(df), use_container_width=True, hide_index=True)
