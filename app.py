@@ -911,7 +911,7 @@ if not df.empty:
 
     st.subheader('Grafici storico e forecast')
     trend_chart_df = build_trend_visual_df(df)
-    trend_chart_view = trend_chart_df.tail(30).copy()
+    trend_chart_view = trend_chart_df.copy()
     trend_status = build_trend_status(df)
     forecast_compare_df = build_forecast_compare_df(df)
     heatmap_df = build_heatmap_pivot(df)
@@ -929,13 +929,13 @@ if not df.empty:
     st.markdown('#### GG per blocco con medie mobili')
     if not trend_chart_view.empty:
         gg_chart = trend_chart_view[['group_label', 'GG', 'gg_ma_3', 'gg_ma_5']].copy()
-        gg_chart['GG_rosso'] = gg_chart['GG'].apply(lambda x: x if x <= 2 else 0)
-        gg_chart['GG_giallo'] = gg_chart['GG'].apply(lambda x: x if x == 3 else 0)
-        gg_chart['GG_verde'] = gg_chart['GG'].apply(lambda x: x if x > 3 else 0)
+        gg_chart['GG <=2'] = gg_chart['GG'].apply(lambda x: x if x <= 2 else None)
+        gg_chart['GG =3'] = gg_chart['GG'].apply(lambda x: x if x == 3 else None)
+        gg_chart['GG >3'] = gg_chart['GG'].apply(lambda x: x if x > 3 else None)
         gg_chart = gg_chart.set_index('group_label')
-        st.bar_chart(gg_chart[['GG_rosso', 'GG_giallo', 'GG_verde']], height=420, use_container_width=True)
-        st.line_chart(gg_chart[['gg_ma_3', 'gg_ma_5']], height=300, use_container_width=True)
-        st.caption('Colori barre: rosso = <=2 GG, giallo = 3 GG, verde = >3 GG. gg_ma_3 = media mobile breve, gg_ma_5 = media mobile più stabile. Se gg_ma_3 sta sopra gg_ma_5, il trend accelera; se sta sotto, il trend rallenta.')
+        st.bar_chart(gg_chart[['GG <=2', 'GG =3', 'GG >3']], height=460, use_container_width=True)
+        st.line_chart(gg_chart[['gg_ma_3', 'gg_ma_5']], height=320, use_container_width=True)
+        st.caption('Colori attesi nel grafico: prima serie = blocchi <=2 GG, seconda serie = blocchi da 3 GG, terza serie = blocchi >3 GG. gg_ma_3 è la media breve, gg_ma_5 la media più stabile.')
     else:
         st.info('Nessun dato disponibile.')
 
@@ -943,7 +943,7 @@ if not df.empty:
     if not trend_chart_view.empty:
         pct_chart = trend_chart_view[['group_label', '% sul totale', 'pct_ma_3', 'pct_ma_5']].copy().set_index('group_label')
         st.line_chart(pct_chart[['% sul totale', 'pct_ma_3', 'pct_ma_5']], height=420, use_container_width=True)
-        st.caption('Vista ultimi 30 blocchi. La linea % sul totale mostra la qualità del blocco: sopra 50% sei in equilibrio positivo, sopra 60% hai spinta forte.')
+        st.caption('Vista completa. La linea % sul totale mostra la qualità del blocco: sopra 50% sei in equilibrio positivo, sopra 60% hai spinta forte.')
     else:
         st.info('Nessun dato disponibile.')
 
