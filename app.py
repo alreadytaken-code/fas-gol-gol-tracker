@@ -544,6 +544,104 @@ def build_giornata_summary(df):
     return out.reset_index(drop=True)
 
 
+def build_trend_visual_df(df):
+    blocks = build_blocks(df)
+    if blocks.empty:
+        return pd.DataFrame(columns=[
+            'group_label', 'GG', '% sul totale', 'gg_ma_3', 'gg_ma_5',
+            'pct_ma_3', 'pct_ma_5', 'state_color', 'state_label', 'cycle_id', 'giornata'
+        ])
+
+    chart_df = blocks.copy().sort_values(['cycle_id', 'giornata'], ascending=[True, True], kind='stable').reset_index(drop=True)
+    chart_df['gg_ma_3'] = chart_df['GG'].rolling(3, min_periods=1).mean().round(2)
+    chart_df['gg_ma_5'] = chart_df['GG'].rolling(5, min_periods=1).mean().round(2)
+    chart_df['pct_ma_3'] = chart_df['% sul totale'].rolling(3, min_periods=1).mean().round(2)
+    chart_df['pct_ma_5'] = chart_df['% sul totale'].rolling(5, min_periods=1).mean().round(2)
+
+    def classify(v):
+        if v >= 4:
+            return 'Alta spinta', '#16a34a'
+        if v == 3:
+            return 'Neutro', '#eab308'
+        return 'Freddo', '#dc2626'
+
+    states = chart_df['GG'].apply(classify)
+    chart_df['state_label'] = states.apply(lambda x: x[0])
+    chart_df['state_color'] = states.apply(lambda x: x[1])
+    return chart_df
+
+
+def build_trend_status(df):
+    chart_df = build_trend_visual_df(df)
+    if chart_df.empty:
+        return {
+            'label': 'Nessun dato', 'delta_short_vs_long': 0.0, 'momentum': 0, 'stress': 0,
+            'last_gg': 0, 'last_pct': 0.0, 'last_vs_ma5': 0.0
+        }
+
+    short_ma = float(chart_df['gg_ma_3'].iloc[-1])
+    long_ma = float(chart_df['gg_ma_5'].iloc[-1])
+    delta = round(short_ma - long_ma, 2)
+
+    if delta >= 0.5:
+        label = 'Trend in accelerazione'
+    elif delta <= -0.5:
+        label = 'Trend in frenata'
+    else:
+        label = 'Trend stabile'
+
+    momentum = 0
+    for v in chart_df['GG'].iloc[::-1].tolist():
+        if v >= 4:
+            momentum += 1
+        else:
+            break
+
+    stress = 0
+    for v in chart_df['GG'].iloc[::-1].tolist():
+        if v <= 2:
+            stress += 1
+        else:
+            break
+
+    last_gg = int(chart_df['GG'].iloc[-1])
+    last_pct = float(chart_df['% sul totale'].iloc[-1])
+    last_vs_ma5 = round(last_gg - long_ma, 2)
+
+    return {
+        'label': label,
+        'delta_short_vs_long': delta,
+        'momentum': momentum,
+        'stress': stress,
+        'last_gg': last_gg,
+        'last_pct': last_pct,
+        'last_vs_ma5': last_vs_ma5
+    }
+
+
+def build_forecast_compare_df(df):
+    forecast = build_forecast(df)
+    trend_df = build_trend_visual_df(df)
+    ma3 = float(trend_df['gg_ma_3'].iloc[-1]) if not trend_df.empty else 0.0
+    ma5 = float(trend_df['gg_ma_5'].iloc[-1]) if not trend_df.empty else 0.0
+    recent10 = float(trend_df.tail(10)['GG'].mean()) if not trend_df.empty else 0.0
+    return pd.DataFrame([
+        {'metrica': 'Ultimo blocco', 'valore': float(trend_df['GG'].iloc[-1]) if not trend_df.empty else 0.0},
+        {'metrica': 'Media mobile 3', 'valore': round(ma3, 2)},
+        {'metrica': 'Media mobile 5', 'valore': round(ma5, 2)},
+        {'metrica': 'Media ultimi 10', 'valore': round(recent10, 2)},
+        {'metrica': 'Forecast prossimo', 'valore': float(forecast['next_block_expected'])},
+    ])
+
+
+def build_heatmap_pivot(df):
+    blocks = build_blocks(df)
+    if blocks.empty:
+        return pd.DataFrame()
+    pivot = blocks.pivot(index='cycle_id', columns='giornata', values='GG').sort_index().sort_index(axis=1)
+    return pivot
+
+
 # -------------------------
 # Predict Top-N
 # -------------------------
@@ -812,23 +910,51 @@ if not df.empty:
     st.dataframe(forecast['details'], use_container_width=True, hide_index=True)
 
     st.subheader('Grafici storico e forecast')
-    blocks_df = build_blocks(df)
+    trend_chart_df = build_trend_visual_df(df)
+    trend_status = build_trend_status(df)
+    forecast_compare_df = build_forecast_compare_df(df)
+    heatmap_df = build_heatmap_pivot(df)
 
-    st.markdown('#### GG per blocco Sisal')
-    if not blocks_df.empty:
-        chart_blocks = blocks_df.copy()
-        chart_blocks['label_chart'] = chart_blocks['group_label']
-        st.bar_chart(chart_blocks.set_index('label_chart')[['GG']], height=360, use_container_width=True)
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric('Stato trend', trend_status['label'])
+    t2.metric('Delta MA3 vs MA5', trend_status['delta_short_vs_long'])
+    t3.metric('Momento 4+ GG', trend_status['momentum'])
+    t4.metric('Stress <=2 GG', trend_status['stress'])
+    st.caption(
+        f"Ultimo blocco: {trend_status['last_gg']} GG ({trend_status['last_pct']:.1f}%) | "
+        f"Scostamento vs MA5: {trend_status['last_vs_ma5']}"
+    )
+
+    st.markdown('#### GG per blocco con medie mobili')
+    if not trend_chart_df.empty:
+        gg_chart = trend_chart_df[['group_label', 'GG', 'gg_ma_3', 'gg_ma_5']].copy().set_index('group_label')
+        st.bar_chart(gg_chart[['GG']], height=320, use_container_width=True)
+        st.line_chart(gg_chart[['gg_ma_3', 'gg_ma_5']], height=220, use_container_width=True)
+        st.caption('Lettura rapida: 4+ GG = blocco forte, 3 = neutro, 0-2 = blocco freddo.')
     else:
         st.info('Nessun dato disponibile.')
 
-    st.markdown('#### Percentuale GG per blocco Sisal')
-    if not blocks_df.empty:
-        chart_blocks = blocks_df.copy()
-        chart_blocks['label_chart'] = chart_blocks['group_label']
-        st.line_chart(chart_blocks.set_index('label_chart')[['% sul totale']], height=360, use_container_width=True)
+    st.markdown('#### Percentuale GG per blocco con smoothing')
+    if not trend_chart_df.empty:
+        pct_chart = trend_chart_df[['group_label', '% sul totale', 'pct_ma_3', 'pct_ma_5']].copy().set_index('group_label')
+        st.line_chart(pct_chart[['% sul totale', 'pct_ma_3', 'pct_ma_5']], height=360, use_container_width=True)
+        st.caption('Livelli chiave: 50% equilibrio, 60% trend forte.')
     else:
         st.info('Nessun dato disponibile.')
+
+    cfa, cfb = st.columns(2)
+    with cfa:
+        st.markdown('#### Confronto rapido forecast')
+        if not forecast_compare_df.empty:
+            st.bar_chart(forecast_compare_df.set_index('metrica')[['valore']], height=320, use_container_width=True)
+        else:
+            st.info('Nessun dato disponibile.')
+    with cfb:
+        st.markdown('#### Heatmap GG per ciclo/giornata')
+        if not heatmap_df.empty:
+            st.dataframe(heatmap_df.style.background_gradient(cmap='RdYlGn', axis=None), use_container_width=True)
+        else:
+            st.info('Nessun dato disponibile.')
 
     st.subheader('Backtest e probabilità')
     backtest = build_backtest(df)
