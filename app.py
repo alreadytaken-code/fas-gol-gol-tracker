@@ -729,15 +729,21 @@ if not df.empty:
         f"Data API usata: {api_day_used}"
     )
 
-    unique_blocks = df[['group_key']].drop_duplicates().shape[0]
-    duplicate_rows = int(len(matches) - df['match_id'].nunique()) if matches else 0
-    latest_block_size = int(
-        df.sort_values('sort_timestamp', ascending=False)
-        .groupby('group_key')
-        .size()
-        .head(1)
-        .iloc[0]
-    ) if not df.empty else 0
+        # Protezione: se per qualche motivo group_key non esiste, salta le metriche blocchi
+    if 'group_key' in df.columns:
+        unique_blocks = df[['group_key']].drop_duplicates().shape[0]
+        duplicate_rows = int(len(matches) - df['match_id'].nunique()) if matches else 0
+        latest_block_size = int(
+            df.sort_values('sort_timestamp', ascending=False)
+              .groupby('group_key')
+              .size()
+              .head(1)
+              .iloc[0]
+        ) if not df.empty else 0
+    else:
+        unique_blocks = 0
+        duplicate_rows = 0
+        latest_block_size = 0
 
     s1, s2, s3 = st.columns(3)
     s1.metric('Partite uniche caricate', int(df['match_id'].nunique()))
