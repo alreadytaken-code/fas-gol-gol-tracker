@@ -10,12 +10,11 @@ st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
 st.caption(
-    "Archivio risultati Sisal con statistiche complete, grafici, container partite "
-    "giorno per giorno a blocchi orari, forecast su massimo 10 blocchi, "
+    "Archivio risultati Sisal con statistiche complete, grafici full width, elenco partite "
+    "giorno per giorno in ordine cronologico, forecast su massimo 10 blocchi, "
     "predict Top-N e reset giornaliero dopo l'1:00"
 )
 
-# Runtime attuale risulta indietro di 1h rispetto all'orario utente osservato.
 LOCAL_TZ_OFFSET_HOURS = 1
 
 
@@ -623,7 +622,6 @@ if not df.empty:
     st.caption(f"Range stimato prossimo blocco: {forecast['range_min']} - {forecast['range_max']} GG")
     st.dataframe(forecast['details'], use_container_width=True, hide_index=True)
 
-    # GRAFICI FULL WIDTH
     st.subheader('Grafici storico e forecast')
     blocks_df = build_blocks(df)
 
@@ -632,7 +630,7 @@ if not df.empty:
         st.bar_chart(
             blocks_df.set_index('orario')[['GOL']],
             height=360,
-            use_container_width=True,
+            use_container_width=True
         )
     else:
         st.info('Nessun dato disponibile.')
@@ -642,7 +640,7 @@ if not df.empty:
         st.line_chart(
             blocks_df.set_index('orario')[['% sul totale']],
             height=360,
-            use_container_width=True,
+            use_container_width=True
         )
     else:
         st.info('Nessun dato disponibile.')
@@ -698,7 +696,7 @@ if not df.empty:
     storico_df = df[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].copy()
     storico_df = storico_df.sort_values(
         ['giornata', 'orario', 'codice_avvenimento'],
-        ascending=[False, False, False]
+        ascending=[False, True, True]
     )
     giornate = storico_df['giornata'].dropna().unique().tolist()
 
@@ -711,16 +709,14 @@ if not df.empty:
                 f'Giornata {g} · Partite {len(blocco_g)} · GG {gg_count} · NG {ng_count}',
                 expanded=False
             ):
-                orari = sorted(blocco_g['orario'].dropna().unique().tolist(), reverse=True)
-                for ora in orari:
-                    mini = blocco_g[blocco_g['orario'] == ora][[
+                st.dataframe(
+                    blocco_g[[
                         'orario', 'giornata', 'codice_avvenimento',
                         'descrizione_avventimento', 'esito'
-                    ]].copy()
-                    gg_b = int((mini['esito'] == 'GOL').sum())
-                    ng_b = int((mini['esito'] == 'NO GOL').sum())
-                    st.markdown(f'**Blocco {ora} · Partite {len(mini)} · GG {gg_b} · NG {ng_b}**')
-                    st.dataframe(mini, use_container_width=True, hide_index=True)
+                    ]],
+                    use_container_width=True,
+                    hide_index=True
+                )
     else:
         st.info('Nessuna giornata disponibile.')
 
