@@ -952,7 +952,8 @@ if not df.empty:
     with cfb:
         st.markdown('#### Heatmap GG per ciclo/giornata')
         if not heatmap_df.empty:
-            st.dataframe(heatmap_df.style.background_gradient(cmap='RdYlGn', axis=None), use_container_width=True)
+            st.dataframe(heatmap_df, use_container_width=True)
+            st.caption('Lettura heatmap: valori più alti = più GG in quella giornata del ciclo.')
         else:
             st.info('Nessun dato disponibile.')
 
