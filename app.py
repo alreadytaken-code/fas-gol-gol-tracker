@@ -11,35 +11,28 @@ st.set_page_config(page_title='FAS League Tracker', layout='wide')
 st.title('FAS League Tracker')
 st.caption(
     "Archivio risultati Sisal con statistiche complete, grafici, container partite "
-    "giorno per giorno, forecast su massimo 10 blocchi, predict Top-N e reset giornaliero dopo l'1:00"
+    "giorno per giorno a blocchi orari, forecast su massimo 10 blocchi, "
+    "predict Top-N e reset giornaliero dopo l'1:00"
 )
 
-# -------------------------------------------------------------------
-# CONFIG FUSO ORARIO (CEST = UTC+2). Cambia OFFSET se ti serve diverso
-# -------------------------------------------------------------------
-LOCAL_TZ_OFFSET_HOURS = 2  # CEST
+# Runtime attuale risulta indietro di 1h rispetto all'orario utente osservato.
+LOCAL_TZ_OFFSET_HOURS = 1
 
 
 def local_now() -> datetime:
-    """Ora locale per timestamp di aggiornamento (non influisce su API-day)."""
     return datetime.now(timezone.utc) + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)
 
 
-# Mappa sigle squadre (usata per lo split dei match manuali)
 TEAM_NAME_MAP = {
     'GEN': 'GEN', 'NAP': 'NAP', 'UDI': 'UDI', 'MIL': 'MIL', 'INT': 'INT', 'ROM': 'ROM',
     'FIO': 'FIO', 'LAZ': 'LAZ', 'SAM': 'SAM', 'ATA': 'ATA', 'VER': 'VER', 'JUV': 'JUV'
 }
 
+
 # -------------------------
 # Utility tempo / reset
 # -------------------------
 def get_operational_datetime() -> datetime:
-    """
-    Giorno operativo:
-    - prima dell'1:00 → ieri (così vedi tutti i blocchi tardi)
-    - dall'1:00 in poi → oggi
-    """
     now_utc = datetime.now(timezone.utc)
     local = now_utc + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)
     if local.hour < 1:
@@ -48,10 +41,6 @@ def get_operational_datetime() -> datetime:
 
 
 def maybe_reset_daily_after_one() -> bool:
-    """
-    Se il giorno è cambiato e sono passate le 1:00 locali, azzera lo storico.
-    Ritorna True se ha fatto reset.
-    """
     now_utc = datetime.now(timezone.utc)
     local = now_utc + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)
     today = local.date().isoformat()
@@ -72,6 +61,7 @@ def maybe_reset_daily_after_one() -> bool:
         return True
 
     return False
+
 
 # -------------------------
 # Storico / API Sisal
@@ -370,6 +360,7 @@ def build_giornata_summary(df):
     grouped['pct_gg'] = ((grouped['GG'] / grouped['partite']) * 100).round(2)
     return grouped
 
+
 # -------------------------
 # Predict Top-N
 # -------------------------
@@ -580,6 +571,7 @@ def build_manual_summary(pred_df, expected_gg_total, gg_slots):
         'predicted_ng_count': predicted_ng_count,
     }
 
+
 # -------------------------
 # UI STORICO PRINCIPALE
 # -------------------------
@@ -616,14 +608,12 @@ if not df.empty:
         f"Data API usata: {api_day_used}"
     )
 
-    # Metriche trend
     trend = build_trend_metrics(df)
     col1, col2, col3 = st.columns(3)
     col1.metric('Partite GG ultimi 5 blocchi', trend['last5'], trend['last5'] - trend['prev5'])
     col2.metric('Partite GG ultimi 10 blocchi', trend['last10'], trend['last10'] - trend['prev10'])
     col3.metric('% partite GG ultimo blocco', f"{trend['latest_block_pct']}%")
 
-    # Forecast
     st.subheader('Previsione prossimi blocchi')
     forecast = build_forecast(df)
     fc1, fc2, fc3 = st.columns(3)
@@ -633,24 +623,29 @@ if not df.empty:
     st.caption(f"Range stimato prossimo blocco: {forecast['range_min']} - {forecast['range_max']} GG")
     st.dataframe(forecast['details'], use_container_width=True, hide_index=True)
 
-    # Grafici storico
+    # GRAFICI FULL WIDTH
     st.subheader('Grafici storico e forecast')
     blocks_df = build_blocks(df)
-    gcol1, gcol2 = st.columns(2)
-    with gcol1:
-        st.markdown('#### GG per blocco orario')
-        if not blocks_df.empty:
-            bar_df = blocks_df.set_index('orario')[['GOL']]
-            st.bar_chart(bar_df, height=320)
-        else:
-            st.info('Nessun dato disponibile.')
-    with gcol2:
-        st.markdown('#### Percentuale GG per blocco')
-        if not blocks_df.empty:
-            trend_df = blocks_df.set_index('orario')[['% sul totale']]
-            st.line_chart(trend_df, height=320)
-        else:
-            st.info('Nessun dato disponibile.')
+
+    st.markdown('#### GG per blocco orario')
+    if not blocks_df.empty:
+        st.bar_chart(
+            blocks_df.set_index('orario')[['GOL']],
+            height=360,
+            use_container_width=True,
+        )
+    else:
+        st.info('Nessun dato disponibile.')
+
+    st.markdown('#### Percentuale GG per blocco')
+    if not blocks_df.empty:
+        st.line_chart(
+            blocks_df.set_index('orario')[['% sul totale']],
+            height=360,
+            use_container_width=True,
+        )
+    else:
+        st.info('Nessun dato disponibile.')
 
     giornata_summary = build_giornata_summary(df)
     gcol3, gcol4 = st.columns(2)
@@ -667,7 +662,6 @@ if not df.empty:
         else:
             st.info('Nessun dato giornata disponibile.')
 
-    # Backtest + probabilità
     st.subheader('Backtest e probabilità')
     backtest = build_backtest(df)
     prob = build_probabilities(df)
@@ -691,7 +685,6 @@ if not df.empty:
     with st.expander('Dettaglio backtest', expanded=False):
         st.dataframe(backtest['table'], use_container_width=True, hide_index=True)
 
-    # Blocchi 6/6
     st.subheader('Blocchi con 6 GG su 6')
     all_gg_stats = build_all_gg_stats(df)
     col4, col5 = st.columns(2)
@@ -701,15 +694,14 @@ if not df.empty:
     with st.expander('Dettaglio blocchi 6 GG su 6', expanded=False):
         st.dataframe(all_gg_stats['blocks_table'], use_container_width=True, hide_index=True)
 
-    # Partite giorno per giorno + blocchi per orario (come prima)
     st.subheader('Partite giorno per giorno')
-    storico_df = df[['orario', 'giornata', 'codice_avvenimento',
-                     'descrizione_avventimento', 'esito']].copy()
+    storico_df = df[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].copy()
     storico_df = storico_df.sort_values(
         ['giornata', 'orario', 'codice_avvenimento'],
         ascending=[False, False, False]
     )
     giornate = storico_df['giornata'].dropna().unique().tolist()
+
     if giornate:
         for g in giornate:
             blocco_g = storico_df[storico_df['giornata'] == g].copy()
@@ -719,18 +711,19 @@ if not df.empty:
                 f'Giornata {g} · Partite {len(blocco_g)} · GG {gg_count} · NG {ng_count}',
                 expanded=False
             ):
-                st.dataframe(blocco_g, use_container_width=True, hide_index=True)
-                orari = blocco_g['orario'].dropna().unique().tolist()
+                orari = sorted(blocco_g['orario'].dropna().unique().tolist(), reverse=True)
                 for ora in orari:
-                    mini = blocco_g[blocco_g['orario'] == ora][
-                        ['orario', 'descrizione_avventimento', 'esito']
-                    ].copy()
-                    st.markdown(f'**Blocco {ora}**')
+                    mini = blocco_g[blocco_g['orario'] == ora][[
+                        'orario', 'giornata', 'codice_avvenimento',
+                        'descrizione_avventimento', 'esito'
+                    ]].copy()
+                    gg_b = int((mini['esito'] == 'GOL').sum())
+                    ng_b = int((mini['esito'] == 'NO GOL').sum())
+                    st.markdown(f'**Blocco {ora} · Partite {len(mini)} · GG {gg_b} · NG {ng_b}**')
                     st.dataframe(mini, use_container_width=True, hide_index=True)
     else:
         st.info('Nessuna giornata disponibile.')
 
-    # Tabella blocchi orari finale
     st.subheader('Blocchi orari')
     st.dataframe(build_blocks(df), use_container_width=True, hide_index=True)
 
@@ -743,6 +736,7 @@ else:
         f"Giorno dati attivo: {st.session_state.get('active_data_day')} | "
         f"Data API usata: {api_day_used}"
     )
+
 
 # -------------------------
 # UI PREDICT FINALE TOP-N
