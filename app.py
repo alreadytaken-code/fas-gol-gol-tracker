@@ -10,16 +10,13 @@ st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
 st.caption(
-    "Archivio risultati Sisal con statistiche complete, grafici full width, elenco partite "
-    "giorno per giorno in ordine cronologico, forecast su massimo 10 blocchi, "
-    "predict Top-N e reset giornaliero dopo l'1:00"
+    'Archivio risultati Sisal con giornate reali da 6 partite, storico sincronizzato, '
+    'forecast su blocchi da 6, ranking manuale GG/NG e reset giornaliero dopo l\'1:00'
 )
 
 LOCAL_TZ_OFFSET_HOURS = 1
-
-
-def local_now() -> datetime:
-    return datetime.now(timezone.utc) + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)
+MATCHES_PER_GIORNATA = 6
+REQUEST_TIMEOUT = 30
 
 
 TEAM_NAME_MAP = {
@@ -31,6 +28,10 @@ TEAM_NAME_MAP = {
 # -------------------------
 # Utility tempo / reset
 # -------------------------
+def local_now() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)
+
+
 def get_operational_datetime() -> datetime:
     now_utc = datetime.now(timezone.utc)
     local = now_utc + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)
@@ -107,24 +108,37 @@ def split_teams(match_name):
     return cleaned, ''
 
 
+def parse_datetime_fields(date_str, data_ora):
+    raw = str(data_ora or '').strip()
+    combined = f'{date_str} {raw}'.strip()
+    dt = pd.to_datetime(combined, dayfirst=True, errors='coerce')
+    if pd.isna(dt):
+        return pd.NaT, raw[:5] if raw else ''
+    return dt, dt.strftime('%H:%M')
+
+
 def fetch_matches():
     operational_dt = get_operational_datetime()
     date_str = operational_dt.strftime('%d-%m-%Y')
     api_url = f'https://betting.sisal.it/api/vrol-api/vrol/archivio/getArchivioGareCampionato/1/3/6/{date_str}'
-    r = requests.get(api_url, timeout=30, headers={
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'application/json',
-        'Referer': 'https://www.sisal.it/'
-    })
-    r.raise_for_status()
-    data = r.json()
+    response = requests.get(
+        api_url,
+        timeout=REQUEST_TIMEOUT,
+        headers={
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'application/json',
+            'Referer': 'https://www.sisal.it/'
+        }
+    )
+    response.raise_for_status()
+    data = response.json()
     matches = []
 
     if not isinstance(data, list):
         return matches, date_str
 
     for giornata_block in data:
-        giornata = giornata_block.get('giornata')
+        giornata_api = giornata_block.get('giornata')
         risultato_map = giornata_block.get('risultatoModelloScommessaCampionatoMap', {})
         if not isinstance(risultato_map, dict):
             continue
@@ -146,12 +160,16 @@ def fetch_matches():
                     if not isinstance(result_list, list):
                         result_list = []
                     esito = infer_gol_gol(result_list)
+                    dt_value, orario = parse_datetime_fields(date_str, data_ora)
 
                     matches.append({
                         'match_id': f'{date_str}-{codice_palinsesto}-{codice_avvenimento}',
-                        'timestamp': f'{date_str} {data_ora}',
-                        'orario': data_ora,
-                        'giornata': giornata,
+                        'api_day': date_str,
+                        'timestamp': dt_value,
+                        'timestamp_str': f'{date_str} {data_ora}',
+                        'orario': orario,
+                        'giornata_api': giornata_api,
+                        'codice_palinsesto': codice_palinsesto,
                         'codice_avvenimento': codice_avvenimento,
                         'descrizione_avventimento': desc,
                         'home_team': home_team,
@@ -161,127 +179,187 @@ def fetch_matches():
 
     dedup = {}
     for m in matches:
-        dedup[m['match_id']] = m
+        current = dedup.get(m['match_id'])
+        if current is None:
+            dedup[m['match_id']] = m
+        else:
+            current_score = (pd.notna(current['timestamp']), current['esito'] != 'N/D')
+            new_score = (pd.notna(m['timestamp']), m['esito'] != 'N/D')
+            if new_score >= current_score:
+                dedup[m['match_id']] = m
+
     results = list(dedup.values())
-    results.sort(key=lambda x: x['timestamp'], reverse=True)
     return results, date_str
 
 
-def build_blocks(df):
+# -------------------------
+# Normalizzazione dataset
+# -------------------------
+def prepare_matches_df(matches):
+    base_columns = [
+        'match_id', 'api_day', 'timestamp', 'timestamp_str', 'orario', 'giornata_api',
+        'codice_palinsesto', 'codice_avvenimento', 'descrizione_avventimento',
+        'home_team', 'away_team', 'esito'
+    ]
+    if not matches:
+        return pd.DataFrame(columns=base_columns + [
+            'sort_timestamp', 'giornata', 'match_nella_giornata', 'giornata_label'
+        ])
+
+    df = pd.DataFrame(matches).copy()
+    for col in base_columns:
+        if col not in df.columns:
+            df[col] = None
+
+    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    fallback_time = pd.to_datetime(df['timestamp_str'], dayfirst=True, errors='coerce')
+    df['sort_timestamp'] = df['timestamp'].fillna(fallback_time)
+
+    df['orario'] = df['orario'].fillna('').astype(str)
+    df['codice_avvenimento'] = df['codice_avvenimento'].fillna('').astype(str)
+    df['descrizione_avventimento'] = df['descrizione_avventimento'].fillna('').astype(str)
+
+    df = df.sort_values(
+        by=['sort_timestamp', 'orario', 'codice_avvenimento', 'match_id'],
+        ascending=[True, True, True, True],
+        kind='stable'
+    ).reset_index(drop=True)
+
+    df['giornata'] = (df.index // MATCHES_PER_GIORNATA) + 1
+    df['match_nella_giornata'] = (df.index % MATCHES_PER_GIORNATA) + 1
+    df['giornata_label'] = df['giornata'].apply(lambda x: f'Giornata {int(x)}')
+
+    return df
+
+
+# -------------------------
+# Blocchi da 6 partite
+# -------------------------
+def get_valid_matches_df(df):
     if df.empty:
-        return pd.DataFrame(columns=['orario', 'codice_avvenimento', 'GOL', '% sul totale'])
-    grouped = df.groupby('orario').agg(
-        codice_avvenimento=('codice_avvenimento', 'first'),
-        totale=('esito', 'count'),
-        GOL=('esito', lambda x: (x == 'GOL').sum())
-    ).reset_index()
-    grouped['% sul totale'] = ((grouped['GOL'] / grouped['totale']) * 100).round(2)
-    grouped = grouped.sort_values('orario', ascending=False)
-    return grouped[['orario', 'codice_avvenimento', 'GOL', '% sul totale']]
+        return df.copy()
+    return df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
+
+
+def build_blocks(df):
+    valid_df = get_valid_matches_df(df)
+    cols = ['giornata', 'partite', 'GG', 'NO_GOL', '% sul totale', 'orario_inizio', 'orario_fine', 'completa']
+    if valid_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    grouped = valid_df.groupby('giornata', as_index=False).agg(
+        partite=('esito', 'count'),
+        GG=('esito', lambda x: (x == 'GOL').sum()),
+        NO_GOL=('esito', lambda x: (x == 'NO GOL').sum()),
+        orario_inizio=('orario', 'first'),
+        orario_fine=('orario', 'last')
+    )
+    grouped['% sul totale'] = ((grouped['GG'] / grouped['partite']) * 100).round(2)
+    grouped['completa'] = grouped['partite'] >= MATCHES_PER_GIORNATA
+    grouped = grouped.sort_values('giornata', ascending=False).reset_index(drop=True)
+    return grouped[cols]
 
 
 def build_trend_metrics(df):
-    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
-    if valid_df.empty:
+    blocks = build_blocks(df)
+    if blocks.empty:
         return {'last5': 0, 'prev5': 0, 'last10': 0, 'prev10': 0, 'latest_block_pct': 0.0}
-    grouped = valid_df.groupby('orario').agg(
-        totale=('esito', 'count'),
-        gol=('esito', lambda x: (x == 'GOL').sum())
-    ).reset_index().sort_values('orario', ascending=False)
-    grouped['pct'] = ((grouped['gol'] / grouped['totale']) * 100).round(2)
+
     return {
-        'last5': int(grouped.head(5)['gol'].sum()),
-        'prev5': int(grouped.iloc[5:10]['gol'].sum()) if len(grouped) > 5 else 0,
-        'last10': int(grouped.head(10)['gol'].sum()),
-        'prev10': int(grouped.iloc[10:20]['gol'].sum()) if len(grouped) > 10 else 0,
-        'latest_block_pct': float(grouped.iloc[0]['pct']) if not grouped.empty else 0.0,
+        'last5': int(blocks.head(5)['GG'].sum()),
+        'prev5': int(blocks.iloc[5:10]['GG'].sum()) if len(blocks) > 5 else 0,
+        'last10': int(blocks.head(10)['GG'].sum()),
+        'prev10': int(blocks.iloc[10:20]['GG'].sum()) if len(blocks) > 10 else 0,
+        'latest_block_pct': float(blocks.iloc[0]['% sul totale']) if not blocks.empty else 0.0,
     }
 
 
 def build_all_gg_stats(df):
-    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
-    if valid_df.empty:
-        return {'total_all_gg_blocks': 0, 'latest_streak': 0,
-                'blocks_table': pd.DataFrame(columns=['orario', 'GG', 'totale', 'all_gg_6su6'])}
-    grouped = valid_df.groupby('orario').agg(
-        totale=('esito', 'count'),
-        GG=('esito', lambda x: (x == 'GOL').sum())
-    ).reset_index().sort_values('orario', ascending=False)
-    grouped['all_gg_6su6'] = (grouped['totale'] == 6) & (grouped['GG'] == 6)
+    blocks = build_blocks(df)
+    if blocks.empty:
+        return {
+            'total_all_gg_blocks': 0,
+            'latest_streak': 0,
+            'blocks_table': pd.DataFrame(columns=['giornata', 'GG', 'partite', 'all_gg_6su6'])
+        }
+
+    blocks = blocks.copy()
+    blocks['all_gg_6su6'] = (blocks['partite'] == MATCHES_PER_GIORNATA) & (blocks['GG'] == MATCHES_PER_GIORNATA)
     streak = 0
-    for value in grouped['all_gg_6su6'].tolist():
+    for value in blocks['all_gg_6su6'].tolist():
         if value:
             streak += 1
         else:
             break
+
     return {
-        'total_all_gg_blocks': int(grouped['all_gg_6su6'].sum()),
+        'total_all_gg_blocks': int(blocks['all_gg_6su6'].sum()),
         'latest_streak': streak,
-        'blocks_table': grouped[['orario', 'GG', 'totale', 'all_gg_6su6']]
+        'blocks_table': blocks[['giornata', 'GG', 'partite', 'all_gg_6su6']]
     }
 
 
 def build_forecast(df):
-    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
-    if valid_df.empty:
+    blocks = build_blocks(df)
+    if blocks.empty:
         return {
-            'rate_5': 0.0, 'rate_10': 0.0, 'weighted_rate': 0.0,
+            'rate_5': 0.0, 'rate_10': 0.0, 'rate_20': 0.0, 'weighted_rate': 0.0,
             'next_block_expected': 0.0, 'next_block_rounded': 0, 'next_3_blocks_expected': 0.0,
             'range_min': 0, 'range_max': 0,
             'details': pd.DataFrame(columns=['finestra', 'percentuale_GG'])
         }
 
-    grouped = valid_df.groupby('orario').agg(
-        totale=('esito', 'count'),
-        GG=('esito', lambda x: (x == 'GOL').sum())
-    ).reset_index().sort_values('orario', ascending=False)
-    grouped = grouped[grouped['totale'] > 0].copy()
-    grouped['rate'] = grouped['GG'] / grouped['totale']
+    blocks = blocks.copy()
+    blocks['rate'] = blocks['GG'] / blocks['partite']
 
     def mean_rate(n):
-        subset = grouped.head(n)
+        subset = blocks.head(n)
         return float(subset['rate'].mean()) if not subset.empty else 0.0
 
     rate_5 = mean_rate(5)
     rate_10 = mean_rate(10)
-    weighted_rate = max(0.0, min(1.0, (0.6 * rate_5) + (0.4 * rate_10)))
-    next_block_expected = round(weighted_rate * 6, 2)
+    rate_20 = mean_rate(20)
+    weighted_rate = max(0.0, min(1.0, (0.5 * rate_5) + (0.3 * rate_10) + (0.2 * rate_20)))
+    next_block_expected = round(weighted_rate * MATCHES_PER_GIORNATA, 2)
     next_block_rounded = int(round(next_block_expected))
     next_3_blocks_expected = round(next_block_expected * 3, 2)
-    range_min = max(0, int(round(next_block_expected - 1)))
-    range_max = min(6, int(round(next_block_expected + 1)))
+    range_min = max(0, int(next_block_expected // 1))
+    range_max = min(MATCHES_PER_GIORNATA, int(next_block_expected // 1) + 1)
 
     details = pd.DataFrame([
         {'finestra': 'Ultimi 5 blocchi', 'percentuale_GG': round(rate_5 * 100, 2)},
         {'finestra': 'Ultimi 10 blocchi', 'percentuale_GG': round(rate_10 * 100, 2)},
+        {'finestra': 'Ultimi 20 blocchi', 'percentuale_GG': round(rate_20 * 100, 2)},
         {'finestra': 'Media pesata finale', 'percentuale_GG': round(weighted_rate * 100, 2)},
     ])
+
     return {
-        'rate_5': rate_5, 'rate_10': rate_10, 'weighted_rate': weighted_rate,
-        'next_block_expected': next_block_expected, 'next_block_rounded': next_block_rounded,
+        'rate_5': rate_5,
+        'rate_10': rate_10,
+        'rate_20': rate_20,
+        'weighted_rate': weighted_rate,
+        'next_block_expected': next_block_expected,
+        'next_block_rounded': next_block_rounded,
         'next_3_blocks_expected': next_3_blocks_expected,
-        'range_min': range_min, 'range_max': range_max,
+        'range_min': range_min,
+        'range_max': range_max,
         'details': details
     }
 
 
 def build_backtest(df):
-    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
-    cols = ['orario', 'actual_GG', 'predicted_GG', 'error']
+    blocks = build_blocks(df).sort_values('giornata', ascending=True).reset_index(drop=True)
+    cols = ['giornata', 'actual_GG', 'predicted_GG', 'error']
     empty = pd.DataFrame(columns=cols)
-    if valid_df.empty:
+    if blocks.empty or len(blocks) < 2:
         return {'mae_10': 0.0, 'mae_20': 0.0, 'bias': 0.0, 'table': empty}
 
-    grouped = valid_df.groupby('orario').agg(
-        totale=('esito', 'count'),
-        GG=('esito', lambda x: (x == 'GOL').sum())
-    ).reset_index().sort_values('orario', ascending=True)
-    grouped = grouped[grouped['totale'] > 0].copy()
-    grouped['rate'] = grouped['GG'] / grouped['totale']
+    blocks = blocks.copy()
+    blocks['rate'] = blocks['GG'] / blocks['partite']
 
     preds = []
-    for i in range(1, len(grouped)):
-        hist = grouped.iloc[:i]
+    for i in range(1, len(blocks)):
+        hist = blocks.iloc[:i].copy()
 
         def mean_rate(n):
             sub = hist.tail(n)
@@ -289,11 +367,12 @@ def build_backtest(df):
 
         rate_5 = mean_rate(5)
         rate_10 = mean_rate(10)
-        weighted_rate = max(0.0, min(1.0, (0.6 * rate_5) + (0.4 * rate_10)))
-        predicted = round(weighted_rate * 6, 2)
-        actual = int(grouped.iloc[i]['GG'])
+        rate_20 = mean_rate(20)
+        weighted_rate = max(0.0, min(1.0, (0.5 * rate_5) + (0.3 * rate_10) + (0.2 * rate_20)))
+        predicted = round(weighted_rate * MATCHES_PER_GIORNATA, 2)
+        actual = int(blocks.iloc[i]['GG'])
         preds.append({
-            'orario': grouped.iloc[i]['orario'],
+            'giornata': int(blocks.iloc[i]['giornata']),
             'actual_GG': actual,
             'predicted_GG': predicted,
             'error': round(predicted - actual, 2),
@@ -303,12 +382,12 @@ def build_backtest(df):
     if not preds:
         return {'mae_10': 0.0, 'mae_20': 0.0, 'bias': 0.0, 'table': empty}
 
-    backtest_df = pd.DataFrame(preds).sort_values('orario', ascending=False)
+    backtest_df = pd.DataFrame(preds).sort_values('giornata', ascending=False).reset_index(drop=True)
     return {
         'mae_10': round(float(backtest_df.head(10)['abs_error'].mean()), 2),
         'mae_20': round(float(backtest_df.head(20)['abs_error'].mean()), 2),
         'bias': round(float(backtest_df['error'].mean()), 2),
-        'table': backtest_df[['orario', 'actual_GG', 'predicted_GG', 'error']]
+        'table': backtest_df[['giornata', 'actual_GG', 'predicted_GG', 'error']]
     }
 
 
@@ -316,12 +395,12 @@ def build_probabilities(df):
     forecast = build_forecast(df)
     p = forecast['weighted_rate']
 
-    def binom_prob_at_least(k, n=6, p=0.0):
+    def binom_prob_at_least(k, n=MATCHES_PER_GIORNATA, p=0.0):
         return sum(comb(n, i) * (p ** i) * ((1 - p) ** (n - i)) for i in range(k, n + 1))
 
-    p_ge4 = binom_prob_at_least(4, 6, p)
-    p_ge5 = binom_prob_at_least(5, 6, p)
-    p_eq6 = p ** 6
+    p_ge4 = binom_prob_at_least(4, MATCHES_PER_GIORNATA, p)
+    p_ge5 = binom_prob_at_least(5, MATCHES_PER_GIORNATA, p)
+    p_eq6 = p ** MATCHES_PER_GIORNATA
 
     alert_level = 'low'
     if forecast['next_block_expected'] >= 4.5 or p_eq6 >= 0.12:
@@ -346,25 +425,20 @@ def build_probabilities(df):
 
 
 def build_giornata_summary(df):
-    if df.empty:
+    blocks = build_blocks(df)
+    if blocks.empty:
         return pd.DataFrame(columns=['giornata', 'partite', 'GG', 'NO_GOL', 'pct_gg'])
-    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
-    if valid_df.empty:
-        return pd.DataFrame(columns=['giornata', 'partite', 'GG', 'NO_GOL', 'pct_gg'])
-    grouped = valid_df.groupby('giornata').agg(
-        partite=('esito', 'count'),
-        GG=('esito', lambda x: (x == 'GOL').sum()),
-        NO_GOL=('esito', lambda x: (x == 'NO GOL').sum())
-    ).reset_index().sort_values('giornata', ascending=False)
-    grouped['pct_gg'] = ((grouped['GG'] / grouped['partite']) * 100).round(2)
-    return grouped
+
+    out = blocks[['giornata', 'partite', 'GG', 'NO_GOL']].copy()
+    out['pct_gg'] = ((out['GG'] / out['partite']) * 100).round(2)
+    return out.sort_values('giornata', ascending=False).reset_index(drop=True)
 
 
 # -------------------------
 # Predict Top-N
 # -------------------------
 def team_recent_form(df, team_code, max_matchdays=10):
-    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy() if not df.empty else pd.DataFrame()
+    valid_df = get_valid_matches_df(df)
     if valid_df.empty:
         return pd.DataFrame(columns=['giornata', 'esito'])
 
@@ -372,7 +446,7 @@ def team_recent_form(df, team_code, max_matchdays=10):
     if subset.empty:
         return pd.DataFrame(columns=['giornata', 'esito'])
 
-    subset = subset.sort_values(['giornata', 'orario'], ascending=[False, False])
+    subset = subset.sort_values(['giornata', 'match_nella_giornata'], ascending=[False, False], kind='stable')
     unique_days = []
     for g in subset['giornata'].dropna().tolist():
         if g not in unique_days:
@@ -415,19 +489,15 @@ def get_team_trend_5_10(df, team_code):
 
 
 def get_global_trend_score(df):
-    valid_df = df[df['esito'].isin(['GOL', 'NO GOL'])].copy() if not df.empty else pd.DataFrame()
-    if valid_df.empty:
+    blocks = build_blocks(df)
+    if blocks.empty:
         return {'rate_5': 0.0, 'rate_10': 0.0, 'trend_score': 0.0}
 
-    grouped = valid_df.groupby('orario').agg(
-        totale=('esito', 'count'),
-        GG=('esito', lambda x: (x == 'GOL').sum())
-    ).reset_index().sort_values('orario', ascending=False)
-    grouped = grouped[grouped['totale'] > 0].copy()
-    grouped['rate'] = grouped['GG'] / grouped['totale']
+    blocks = blocks.copy()
+    blocks['rate'] = blocks['GG'] / blocks['partite']
 
     def mean_rate(n):
-        subset = grouped.head(n)
+        subset = blocks.head(n)
         return float(subset['rate'].mean()) if not subset.empty else 0.0
 
     rate_5 = mean_rate(5)
@@ -595,17 +665,24 @@ matches = st.session_state.get('matches', [])
 last_update = st.session_state.get('last_update', '-')
 api_day_used = st.session_state.get('api_day_used', get_operational_datetime().strftime('%d-%m-%Y'))
 
-df = pd.DataFrame(matches) if matches else pd.DataFrame(
-    columns=['orario', 'timestamp', 'esito', 'giornata', 'home_team', 'away_team']
-)
+df = prepare_matches_df(matches)
 
 if not df.empty:
-    df = df.sort_values(['orario', 'timestamp'], ascending=False)
     st.markdown(f'**Ultimo aggiornamento (locale):** {last_update}')
     st.caption(
         f"Giorno dati attivo: {st.session_state.get('active_data_day')} | "
         f"Data API usata: {api_day_used}"
     )
+
+    total_rows = len(df)
+    valid_rows = int(df['esito'].isin(['GOL', 'NO GOL']).sum())
+    latest_giornata = int(df['giornata'].max()) if not df.empty else 0
+    latest_count = int((df['giornata'] == latest_giornata).sum()) if latest_giornata else 0
+    sync_label = 'Sincronizzato' if latest_count == MATCHES_PER_GIORNATA else f'Ultima giornata incompleta ({latest_count}/{MATCHES_PER_GIORNATA})'
+    s1, s2, s3 = st.columns(3)
+    s1.metric('Partite totali caricate', total_rows)
+    s2.metric('Partite con esito valido', valid_rows)
+    s3.metric('Stato ultima giornata', sync_label)
 
     trend = build_trend_metrics(df)
     col1, col2, col3 = st.columns(3)
@@ -625,20 +702,20 @@ if not df.empty:
     st.subheader('Grafici storico e forecast')
     blocks_df = build_blocks(df)
 
-    st.markdown('#### GG per blocco orario')
+    st.markdown('#### GG per giornata da 6 partite')
     if not blocks_df.empty:
         st.bar_chart(
-            blocks_df.set_index('orario')[['GOL']],
+            blocks_df.set_index('giornata')[['GG']],
             height=360,
             use_container_width=True
         )
     else:
         st.info('Nessun dato disponibile.')
 
-    st.markdown('#### Percentuale GG per blocco')
+    st.markdown('#### Percentuale GG per giornata')
     if not blocks_df.empty:
         st.line_chart(
-            blocks_df.set_index('orario')[['% sul totale']],
+            blocks_df.set_index('giornata')[['% sul totale']],
             height=360,
             use_container_width=True
         )
@@ -693,34 +770,43 @@ if not df.empty:
         st.dataframe(all_gg_stats['blocks_table'], use_container_width=True, hide_index=True)
 
     st.subheader('Partite giorno per giorno')
-    storico_df = df[['orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].copy()
+    storico_df = df[[
+        'giornata', 'match_nella_giornata', 'orario', 'codice_avvenimento',
+        'descrizione_avventimento', 'esito', 'giornata_api'
+    ]].copy()
     storico_df = storico_df.sort_values(
-        ['giornata', 'orario', 'codice_avvenimento'],
-        ascending=[False, True, True]
-    )
+        ['giornata', 'match_nella_giornata', 'orario', 'codice_avvenimento'],
+        ascending=[False, True, True, True],
+        kind='stable'
+    ).reset_index(drop=True)
     giornate = storico_df['giornata'].dropna().unique().tolist()
 
     if giornate:
         for g in giornate:
-            blocco_g = storico_df[storico_df['giornata'] == g].copy()
+            blocco_g = storico_df[storico_df['giornata'] == g].copy().reset_index(drop=True)
             gg_count = int((blocco_g['esito'] == 'GOL').sum())
             ng_count = int((blocco_g['esito'] == 'NO GOL').sum())
+            completo = len(blocco_g) == MATCHES_PER_GIORNATA
+            stato = 'completa' if completo else f'in corso {len(blocco_g)}/{MATCHES_PER_GIORNATA}'
             with st.expander(
-                f'Giornata {g} · Partite {len(blocco_g)} · GG {gg_count} · NG {ng_count}',
+                f'Giornata {int(g)} · Partite {len(blocco_g)}/{MATCHES_PER_GIORNATA} · GG {gg_count} · NG {ng_count} · {stato}',
                 expanded=False
             ):
                 st.dataframe(
                     blocco_g[[
-                        'orario', 'giornata', 'codice_avvenimento',
-                        'descrizione_avventimento', 'esito'
-                    ]],
+                        'match_nella_giornata', 'orario', 'codice_avvenimento',
+                        'descrizione_avventimento', 'esito', 'giornata_api'
+                    ]].rename(columns={
+                        'match_nella_giornata': 'n_match',
+                        'giornata_api': 'giornata_api_sisal'
+                    }),
                     use_container_width=True,
                     hide_index=True
                 )
     else:
         st.info('Nessuna giornata disponibile.')
 
-    st.subheader('Blocchi orari')
+    st.subheader('Blocchi giornalieri')
     st.dataframe(build_blocks(df), use_container_width=True, hide_index=True)
 
 else:
@@ -828,7 +914,8 @@ else:
             st.info('Nessuna predict disponibile.')
 
     with st.expander('Formula predict usata', expanded=False):
-        st.write('Forecast generale prossimo blocco: 60% ultimi 5 blocchi + 40% ultimi 10 blocchi.')
+        st.write('Forecast generale prossimo blocco: 50% ultimi 5 blocchi + 30% ultimi 10 blocchi + 20% ultimi 20 blocchi.')
+        st.write('Ogni blocco reale è una giornata da 6 partite, non un gruppo orario.')
         st.write('Trend squadra = 60% rate ultime 5 giornate + 40% rate ultime 10 giornate.')
         st.write('Trend match = media trend squadra casa e trasferta.')
         st.write('Score finale = 50% trend match + 25% trend globale + 20% probabilità mercato + 5% bonus classifica.')
@@ -836,7 +923,11 @@ else:
         st.write('Predict finale = Top-N del ranking, dove N è il numero arrotondato di GG attesi totali.')
         st.write(
             "Gestione mezzanotte: prima dell'1:00 l’API viene interrogata sul giorno operativo precedente, "
-            "così vedi tutti i blocchi fino all’ultima ora."
+            'così vedi tutti i blocchi fino all’ultima ora.'
+        )
+        st.write(
+            "Sincronizzazione migliorata: ordinamento stabile, deduplica per match_id, giornata reale costruita ogni volta da zero "
+            'e ultima giornata mostrata anche se incompleta.'
         )
         st.write(
             "Reset giornaliero: dopo l'1:00, se il giorno è cambiato, lo storico viene azzerato automaticamente "
