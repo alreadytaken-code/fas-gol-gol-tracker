@@ -287,8 +287,37 @@ def get_valid_matches_df(df):
     return df[df['esito'].isin(['GOL', 'NO GOL'])].copy()
 
 
+def ensure_block_columns(df):
+    required = ['group_key', 'cycle_id', 'giornata', 'group_label', 'sort_timestamp']
+    if df.empty:
+        return df.copy()
+    missing = [c for c in required if c not in df.columns]
+    if not missing:
+        return df.copy()
+    source_cols = set(df.columns.tolist())
+    minimal_keys = {'match_id', 'timestamp', 'timestamp_str', 'orario', 'codice_avvenimento', 'giornata'}
+    if 'giornata' in source_cols and minimal_keys.intersection(source_cols):
+        records = df.to_dict(orient='records')
+        return prepare_matches_df(records)
+    rebuilt = df.copy()
+    if 'sort_timestamp' not in rebuilt.columns:
+        if 'timestamp' in rebuilt.columns:
+            rebuilt['sort_timestamp'] = pd.to_datetime(rebuilt['timestamp'], errors='coerce')
+        else:
+            rebuilt['sort_timestamp'] = pd.NaT
+    if 'cycle_id' not in rebuilt.columns:
+        rebuilt['cycle_id'] = 1
+    if 'group_key' not in rebuilt.columns:
+        giornata_series = rebuilt['giornata'] if 'giornata' in rebuilt.columns else pd.Series(['NA'] * len(rebuilt), index=rebuilt.index)
+        rebuilt['group_key'] = rebuilt['cycle_id'].astype(str) + '-' + giornata_series.astype(str)
+    if 'group_label' not in rebuilt.columns:
+        giornata_series = rebuilt['giornata'] if 'giornata' in rebuilt.columns else pd.Series(['NA'] * len(rebuilt), index=rebuilt.index)
+        rebuilt['group_label'] = 'Ciclo ' + rebuilt['cycle_id'].astype(str) + ' · Giornata ' + giornata_series.astype(str)
+    return rebuilt
+
+
 def build_blocks(df):
-    valid_df = get_valid_matches_df(df)
+    valid_df = ensure_block_columns(get_valid_matches_df(df))
     cols = [
         'cycle_id', 'giornata', 'partite', 'GG', 'NO_GOL', '% sul totale',
         'orario_inizio', 'orario_fine', 'group_label', 'completa'
