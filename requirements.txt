@@ -1,7 +1,4 @@
 streamlit
 pandas
 requests
-pillow
-easyocr
-torch
-torchvision
+plotly
