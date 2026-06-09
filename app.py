@@ -11,7 +11,7 @@ import streamlit as st
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('VERSIONE CODICE: 2026-06-09 22:38 - v2 complete')
+st.caption('VERSIONE CODICE: 2026-06-09 22:46 - v2 complete fixed predict')
 st.caption('Storico Sisal, forecast blocchi, heatmap, ranking manuale, export, storico pronostici, ROI e bankroll tracker.')
 
 LOCAL_TZ_OFFSET_HOURS = 1
@@ -663,9 +663,15 @@ if raw_text.strip() and not parsed_df.empty:
     g4.metric('Stake totale suggerito', round(float(pred_df['stake_units'].sum()), 2) if not pred_df.empty else 0.0)
 
     st.markdown('### Predict completa match per match')
-    predict_list = pred_df[['match', 'prediction', 'score_finale', 'edge', 'ev_pct', 'stake_units', 'confidence_band']].copy()
-    predict_list['score_finale'] = (predict_list['score_finale'] * 100).round(2)
-    predict_list['edge'] = (predict_list['edge'] * 100).round(2)
+    for c, default in [('prediction','NG'), ('score_finale',0.0), ('edge',0.0), ('ev_pct',0.0), ('stake_units',0.0), ('confidence_band','Bassa')]:
+        if c not in pred_df.columns:
+            pred_df[c] = default
+    predict_cols = ['match', 'prediction', 'score_finale', 'edge', 'ev_pct', 'stake_units', 'confidence_band']
+    predict_list = pred_df[predict_cols].copy()
+    predict_list['score_finale'] = (pd.to_numeric(predict_list['score_finale'], errors='coerce').fillna(0) * 100).round(2)
+    predict_list['edge'] = (pd.to_numeric(predict_list['edge'], errors='coerce').fillna(0) * 100).round(2)
+    predict_list['ev_pct'] = pd.to_numeric(predict_list['ev_pct'], errors='coerce').fillna(0).round(2)
+    predict_list['stake_units'] = pd.to_numeric(predict_list['stake_units'], errors='coerce').fillna(0).round(2)
     predict_list.columns = ['Match', 'Previsione', 'Score %', 'Edge %', 'EV %', 'Stake', 'Confidenza']
     st.dataframe(predict_list, use_container_width=True, hide_index=True)
 
