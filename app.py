@@ -5,10 +5,12 @@ from math import comb
 import pandas as pd
 import requests
 import streamlit as st
+import plotly.graph_objects as go
 
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
+st.caption('VERSIONE CODICE: 2026-06-09 22:00 - label_chart_fix')
 st.caption(
     'Archivio risultati Sisal con giornate Sisal 1-22 senza duplicati, cicli distinti, '
     'forecast su blocchi da 6, ranking manuale GG/NG e reset giornaliero dopo l\'1:00'
@@ -548,11 +550,16 @@ def build_trend_visual_df(df):
     blocks = build_blocks(df)
     if blocks.empty:
         return pd.DataFrame(columns=[
-            'group_label', 'GG', '% sul totale', 'gg_ma_3', 'gg_ma_5',
-            'pct_ma_3', 'pct_ma_5', 'state_color', 'state_label', 'cycle_id', 'giornata'
+            'group_label', 'label_chart', 'GG', '% sul totale', 'gg_ma_3', 'gg_ma_5',
+            'pct_ma_3', 'pct_ma_5', 'state_color', 'state_label', 'cycle_id', 'giornata',
+            'orario_inizio'
         ])
 
     chart_df = blocks.copy().sort_values(['cycle_id', 'giornata'], ascending=[True, True], kind='stable').reset_index(drop=True)
+    chart_df['orario_inizio'] = chart_df['orario_inizio'].fillna('').astype(str).str[:5]
+    chart_df['label_chart'] = chart_df.apply(
+        lambda r: f"Giornata {int(r['giornata'])} · {r['orario_inizio'] if r['orario_inizio'] else '--:--'}", axis=1
+    )
     chart_df['gg_ma_3'] = chart_df['GG'].rolling(3, min_periods=1).mean().round(2)
     chart_df['gg_ma_5'] = chart_df['GG'].rolling(5, min_periods=1).mean().round(2)
     chart_df['pct_ma_3'] = chart_df['% sul totale'].rolling(3, min_periods=1).mean().round(2)
@@ -640,6 +647,20 @@ def build_heatmap_pivot(df):
         return pd.DataFrame()
     pivot = blocks.pivot(index='cycle_id', columns='giornata', values='GG').sort_index().sort_index(axis=1)
     return pivot
+
+
+def build_orario_gg_table(df):
+    blocks = build_blocks(df)
+    if blocks.empty:
+        return pd.DataFrame(columns=['giornata', 'orario', 'GG', 'NO_GOL', 'partite', '%GG'])
+    out = blocks[['giornata', 'orario_inizio', 'GG', 'NO_GOL', 'partite', '% sul totale']].copy()
+    out = out.rename(columns={
+        'orario_inizio': 'orario',
+        '% sul totale': '%GG'
+    })
+    out['orario'] = out['orario'].fillna('').astype(str).str[:5]
+    out = out.sort_values(['giornata', 'orario'], ascending=[True, True], kind='stable').reset_index(drop=True)
+    return out
 
 
 # -------------------------
@@ -928,20 +949,29 @@ if not df.empty:
 
     st.markdown('#### GG per blocco con medie mobili')
     if not trend_chart_view.empty:
-        gg_chart = trend_chart_view[['group_label', 'GG', 'gg_ma_3', 'gg_ma_5']].copy()
+        gg_chart = trend_chart_view[['label_chart', 'GG', 'gg_ma_3', 'gg_ma_5']].copy()
         gg_chart['GG <=2'] = gg_chart['GG'].apply(lambda x: x if x <= 2 else None)
         gg_chart['GG =3'] = gg_chart['GG'].apply(lambda x: x if x == 3 else None)
         gg_chart['GG >3'] = gg_chart['GG'].apply(lambda x: x if x > 3 else None)
-        gg_chart = gg_chart.set_index('group_label')
-        st.bar_chart(gg_chart[['GG <=2', 'GG =3', 'GG >3']], height=460, use_container_width=True)
-        st.line_chart(gg_chart[['gg_ma_3', 'gg_ma_5']], height=320, use_container_width=True)
-        st.caption('Colori attesi nel grafico: prima serie = blocchi <=2 GG, seconda serie = blocchi da 3 GG, terza serie = blocchi >3 GG. gg_ma_3 è la media breve, gg_ma_5 la media più stabile.')
+
+        fig = go.Figure()
+        fig.add_bar(x=gg_chart['label_chart'], y=gg_chart['GG <=2'], name='GG <=2', marker_color='#dc2626')
+        fig.add_bar(x=gg_chart['label_chart'], y=gg_chart['GG =3'], name='GG =3', marker_color='#eab308')
+        fig.add_bar(x=gg_chart['label_chart'], y=gg_chart['GG >3'], name='GG >3', marker_color='#16a34a')
+        fig.add_scatter(x=gg_chart['label_chart'], y=gg_chart['gg_ma_3'], mode='lines', name='gg_ma_3', line=dict(color='#7dd3fc', width=2))
+        fig.add_scatter(x=gg_chart['label_chart'], y=gg_chart['gg_ma_5'], mode='lines', name='gg_ma_5', line=dict(color='#38bdf8', width=3))
+        fig.update_layout(barmode='overlay', height=520, xaxis_title='Giornata + orario', yaxis_title='GG', legend_title='Serie')
+        fig.update_xaxes(type='category', categoryorder='array', categoryarray=gg_chart['label_chart'].tolist())
+        fig.update_yaxes(range=[0, 6], dtick=1)
+        fig.update_xaxes(tickangle=-90)
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption('Asse Y fisso 0-6. Etichette solo Giornata + orario. Colori: rosso <=2, giallo =3, verde >3.')
     else:
         st.info('Nessun dato disponibile.')
 
     st.markdown('#### Percentuale GG per blocco con smoothing')
     if not trend_chart_view.empty:
-        pct_chart = trend_chart_view[['group_label', '% sul totale', 'pct_ma_3', 'pct_ma_5']].copy().set_index('group_label')
+        pct_chart = trend_chart_view[['label_chart', '% sul totale', 'pct_ma_3', 'pct_ma_5']].copy().set_index('label_chart')
         st.line_chart(pct_chart[['% sul totale', 'pct_ma_3', 'pct_ma_5']], height=420, use_container_width=True)
         st.caption('Vista completa. La linea % sul totale mostra la qualità del blocco: sopra 50% sei in equilibrio positivo, sopra 60% hai spinta forte.')
     else:
@@ -961,6 +991,14 @@ if not df.empty:
             st.caption('Lettura heatmap: valori più alti = più GG in quella giornata del ciclo.')
         else:
             st.info('Nessun dato disponibile.')
+
+    st.markdown('#### Tabella orario e GG per giornata')
+    orario_gg_df = build_orario_gg_table(df)
+    if not orario_gg_df.empty:
+        st.dataframe(orario_gg_df, use_container_width=True, hide_index=True)
+        st.caption("Questa tabella mostra per ogni giornata l'orario del blocco e quanti GG sono usciti in quel blocco.")
+    else:
+        st.info('Nessun dato disponibile.')
 
     st.subheader('Backtest e probabilità')
     backtest = build_backtest(df)
