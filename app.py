@@ -11,7 +11,7 @@ import streamlit as st
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('VERSIONE CODICE: 2026-06-09 23:00 - v4 patterns combo')
+st.caption('VERSIONE CODICE: 2026-06-09 23:05 - v6 patterns top section')
 st.caption('Storico Sisal, forecast blocchi, heatmap, ranking manuale, export, storico pronostici, ROI e bankroll tracker.')
 
 LOCAL_TZ_OFFSET_HOURS = 1
@@ -572,54 +572,79 @@ def build_position_history(df):
 
 def build_position_pattern_suggestions(df, target_gg):
     pos_df = build_position_history(df)
-    if pos_df.empty or target_gg <= 0:
-        return {
-            'repeat_combo': [], 'repeat_note': 'Nessun dato disponibile.',
-            'cold_combo': [], 'cold_note': 'Nessun dato disponibile.',
-            'top_combos_df': pd.DataFrame(columns=['combo', 'frequenza'])
-        }
+    fallback = {
+        'repeat_combo': [],
+        'repeat_note': 'Storico insufficiente.',
+        'cold_combo': [],
+        'cold_note': 'Storico insufficiente.',
+        'top_combos_df': pd.DataFrame(columns=['combo', 'frequenza'])
+    }
+    if pos_df.empty:
+        return fallback
+
+    if target_gg <= 0:
+        target_gg = 3
+
+    block_sizes = pos_df.groupby('group_label')['position'].max().reset_index(name='max_pos')
+    valid_labels = block_sizes[block_sizes['max_pos'] >= 6]['group_label'].tolist()
+    if valid_labels:
+        pos_df = pos_df[pos_df['group_label'].isin(valid_labels)].copy()
+    if pos_df.empty:
+        return fallback
 
     block_patterns = []
     for label, g in pos_df.groupby('group_label', sort=False):
         gg_positions = sorted(g.loc[g['esito'] == 'GOL', 'position'].astype(int).tolist())
         if len(gg_positions) == target_gg:
-            combo = ' '.join(map(str, gg_positions))
-            block_patterns.append(combo)
-    freq_df = pd.Series(block_patterns).value_counts().reset_index() if block_patterns else pd.DataFrame(columns=['combo', 'count'])
+            block_patterns.append(' '.join(map(str, gg_positions)))
+
+    freq_df = pd.Series(block_patterns).value_counts().reset_index() if block_patterns else pd.DataFrame(columns=['combo', 'frequenza'])
     if not freq_df.empty:
         freq_df.columns = ['combo', 'frequenza']
         repeat_combo = freq_df.iloc[0]['combo'].split()
         repeat_note = f"Pattern ricorrente più frequente su blocchi da {target_gg} GG."
         top_combos_df = freq_df.head(10).copy()
     else:
-        repeat_combo = []
-        repeat_note = f"Nessun pattern storico con esattamente {target_gg} GG."
-        top_combos_df = pd.DataFrame(columns=['combo', 'frequenza'])
+        all_patterns = []
+        for label, g in pos_df.groupby('group_label', sort=False):
+            gg_positions = sorted(g.loc[g['esito'] == 'GOL', 'position'].astype(int).tolist())
+            if gg_positions:
+                all_patterns.append(' '.join(map(str, gg_positions)))
+        if all_patterns:
+            freq_df = pd.Series(all_patterns).value_counts().reset_index()
+            freq_df.columns = ['combo', 'frequenza']
+            top_combos_df = freq_df.head(10).copy()
+            repeat_combo = freq_df.iloc[0]['combo'].split()
+            repeat_note = f"Nessun pattern esatto da {target_gg} GG: mostrato il pattern storico più frequente in assoluto."
+        else:
+            repeat_combo = []
+            repeat_note = 'Nessun pattern storico utile trovato.'
+            top_combos_df = pd.DataFrame(columns=['combo', 'frequenza'])
 
-    pos_summary = pos_df.groupby('position').agg(
-        gg_rate=('esito', lambda x: float((x == 'GOL').mean())),
-        total=('esito', 'count')
-    ).reset_index()
-
+    pos_summary = pos_df.groupby('position').agg(gg_rate=('esito', lambda x: float((x == 'GOL').mean())), total=('esito', 'count')).reset_index()
     last_seen = []
-    ordered_blocks = list(dict.fromkeys(pos_df['group_label'].tolist()))
-    ordered_blocks = ordered_blocks[::-1]
+    ordered_blocks = list(dict.fromkeys(pos_df['group_label'].tolist()))[::-1]
     for pos in range(1, 7):
         streak = 0
+        seen_any = False
         for label in ordered_blocks:
             row = pos_df[(pos_df['group_label'] == label) & (pos_df['position'] == pos)]
             if row.empty:
                 continue
+            seen_any = True
             esito = row.iloc[0]['esito']
             if esito == 'GOL':
                 break
             streak += 1
+        if not seen_any:
+            streak = 0
         last_seen.append({'position': pos, 'cold_streak': streak})
     cold_df = pd.DataFrame(last_seen).merge(pos_summary, on='position', how='left')
-    cold_df['cold_score'] = cold_df['cold_streak'] - (cold_df['gg_rate'].fillna(0) * 2)
-    cold_df = cold_df.sort_values(['cold_score', 'cold_streak'], ascending=[False, False], kind='stable')
-    cold_combo = cold_df.head(target_gg)['position'].astype(int).sort_values().astype(str).tolist()
-    cold_note = 'Pattern freddo: posizioni che non fanno GG da più blocchi.'
+    cold_df['gg_rate'] = cold_df['gg_rate'].fillna(0)
+    cold_df['cold_score'] = cold_df['cold_streak'] + ((1 - cold_df['gg_rate']) * 2)
+    cold_df = cold_df.sort_values(['cold_score', 'cold_streak', 'position'], ascending=[False, False, True], kind='stable')
+    cold_combo = cold_df.head(min(target_gg, 6))['position'].astype(int).sort_values().astype(str).tolist()
+    cold_note = 'Pattern freddo: posizioni che non fanno GG da più blocchi o che storicamente hanno resa più bassa.'
 
     return {
         'repeat_combo': repeat_combo,
@@ -700,6 +725,22 @@ if not df.empty:
         st.markdown('#### Tabella orario e GG per giornata')
         st.dataframe(orario_gg_df, use_container_width=True, hide_index=True)
 
+    st.subheader('Pattern combinazioni per posizione')
+    target_pattern_gg = st.slider('Numero GG da usare per i pattern posizione', min_value=1, max_value=6, value=3, step=1)
+    pattern_info = build_position_pattern_suggestions(df, target_pattern_gg)
+    p1, p2 = st.columns(2)
+    with p1:
+        combo_repeat = ' '.join(pattern_info['repeat_combo']) if pattern_info['repeat_combo'] else '-'
+        st.metric('Pattern ricorrente', combo_repeat)
+        st.caption(pattern_info['repeat_note'])
+    with p2:
+        combo_cold = ' '.join(pattern_info['cold_combo']) if pattern_info['cold_combo'] else '-'
+        st.metric('Pattern freddo', combo_cold)
+        st.caption(pattern_info['cold_note'])
+    if not pattern_info['top_combos_df'].empty:
+        st.markdown('#### Combinazioni storiche più frequenti')
+        st.dataframe(pattern_info['top_combos_df'], use_container_width=True, hide_index=True)
+
     st.subheader('Centro decisionale')
     d1, d2, d3, d4 = st.columns(4)
     d1.metric('Hit rate backtest', f"{diagnostics['hit_rate']:.1f}%")
@@ -749,21 +790,6 @@ if raw_text.strip() and not parsed_df.empty:
     g2.metric('Partite previste GG', int((pred_df['prediction'] == 'GG').sum()) if not pred_df.empty else 0)
     g3.metric('Partite +EV', int((pred_df['edge'] > 0).sum()) if not pred_df.empty else 0)
     g4.metric('Stake totale suggerito', round(float(pred_df['stake_units'].sum()), 2) if not pred_df.empty else 0.0)
-
-    pattern_info = build_position_pattern_suggestions(df, int((pred_df['prediction'] == 'GG').sum()) if not pred_df.empty else 0)
-    st.markdown('### Pattern combinazioni per posizione')
-    p1, p2 = st.columns(2)
-    with p1:
-        combo_repeat = ' '.join(pattern_info['repeat_combo']) if pattern_info['repeat_combo'] else '-'
-        st.metric('Pattern ricorrente', combo_repeat)
-        st.caption(pattern_info['repeat_note'])
-    with p2:
-        combo_cold = ' '.join(pattern_info['cold_combo']) if pattern_info['cold_combo'] else '-'
-        st.metric('Pattern freddo', combo_cold)
-        st.caption(pattern_info['cold_note'])
-    if not pattern_info['top_combos_df'].empty:
-        st.markdown('#### Combinazioni storiche più frequenti')
-        st.dataframe(pattern_info['top_combos_df'], use_container_width=True, hide_index=True)
 
     st.markdown('### Predict completa match per match')
     for c, default in [('prediction','NG'), ('score_finale',0.0), ('edge',0.0), ('ev_pct',0.0), ('stake_units',0.0), ('confidence_band','Bassa')]:
