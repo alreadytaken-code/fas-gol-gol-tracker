@@ -11,7 +11,7 @@ import streamlit as st
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('VERSIONE CODICE: 2026-06-09 22:46 - v2 complete fixed predict')
+st.caption('VERSIONE CODICE: 2026-06-09 22:52 - v3 containers restore')
 st.caption('Storico Sisal, forecast blocchi, heatmap, ranking manuale, export, storico pronostici, ROI e bankroll tracker.')
 
 LOCAL_TZ_OFFSET_HOURS = 1
@@ -621,7 +621,9 @@ if not df.empty:
     with c1:
         st.markdown('#### Heatmap GG per ciclo/giornata')
         if not heatmap_df.empty:
-            st.dataframe(heatmap_df, use_container_width=True)
+            heatmap_show = heatmap_df.fillna('-')
+            st.dataframe(heatmap_show, use_container_width=True)
+            st.caption('Lettura semplice: righe = cicli, colonne = giornate, cella = numero GG usciti in quella giornata. Valori alti = blocco più caldo.')
         else:
             st.info('Nessun dato disponibile.')
     with c2:
@@ -637,6 +639,22 @@ if not df.empty:
 
     st.subheader('Backtest dettagli')
     st.dataframe(backtest['table'], use_container_width=True, hide_index=True)
+
+    with st.expander('Partite giorno per giorno', expanded=False):
+        storico_df = df[['cycle_id', 'giornata', 'group_label', 'match_nel_blocco', 'orario', 'codice_avvenimento', 'descrizione_avventimento', 'esito', 'group_key', 'sort_timestamp']].copy()
+        block_order = storico_df.groupby('group_key', dropna=False).agg(last_ts=('sort_timestamp', 'max'), group_label=('group_label', 'first')).reset_index(drop=True).sort_values('last_ts', ascending=False, kind='stable')
+        ordered_labels = block_order['group_label'].tolist()
+        for label in ordered_labels:
+            blocco_g = storico_df[storico_df['group_label'] == label].copy().sort_values(['match_nel_blocco', 'orario', 'codice_avvenimento'], kind='stable').reset_index(drop=True)
+            gg_count = int((blocco_g['esito'] == 'GOL').sum())
+            ng_count = int((blocco_g['esito'] == 'NO GOL').sum())
+            giornata_value = int(blocco_g['giornata'].iloc[0]) if not blocco_g.empty else 0
+            with st.expander(f'Giornata {giornata_value} · Partite {len(blocco_g)} · GG {gg_count} · NG {ng_count}', expanded=False):
+                st.dataframe(
+                    blocco_g[['match_nel_blocco', 'orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].rename(columns={'match_nel_blocco': 'n_match'}),
+                    use_container_width=True,
+                    hide_index=True
+                )
 else:
     st.info("Premi 'Aggiorna risultati' per caricare i dati storici del giorno.")
 
