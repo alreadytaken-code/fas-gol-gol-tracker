@@ -11,7 +11,7 @@ import streamlit as st
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('VERSIONE CODICE: 2026-06-09 23:05 - v6 patterns top section')
+st.caption('VERSIONE CODICE: 2026-06-10 21:01 - v7 trend restore no extra tables')
 st.caption('Storico Sisal, forecast blocchi, heatmap, ranking manuale, export, storico pronostici, ROI e bankroll tracker.')
 
 LOCAL_TZ_OFFSET_HOURS = 1
@@ -299,6 +299,36 @@ def build_orario_gg_table(df):
     out = out.rename(columns={'orario_inizio': 'orario', '% sul totale': '%GG'})
     out['orario'] = out['orario'].fillna('').astype(str).str[:5]
     return out.sort_values(['giornata', 'orario'], ascending=[True, True], kind='stable').reset_index(drop=True)
+
+
+def build_trend_status(df):
+    chart_df = build_trend_visual_df(df)
+    if chart_df.empty:
+        return {'label': 'Nessun dato', 'delta_short_vs_long': 0.0, 'momentum': 0, 'stress': 0, 'last_gg': 0, 'last_vs_ma5': 0.0}
+    short_ma = float(chart_df['gg_ma_3'].iloc[-1])
+    long_ma = float(chart_df['gg_ma_5'].iloc[-1])
+    delta = round(short_ma - long_ma, 2)
+    if delta >= 0.5:
+        label = 'Trend in crescita'
+    elif delta <= -0.5:
+        label = 'Trend in discesa'
+    else:
+        label = 'Trend stabile'
+    momentum = 0
+    for v in chart_df['GG'].iloc[::-1].tolist():
+        if v >= 4:
+            momentum += 1
+        else:
+            break
+    stress = 0
+    for v in chart_df['GG'].iloc[::-1].tolist():
+        if v <= 2:
+            stress += 1
+        else:
+            break
+    last_gg = int(chart_df['GG'].iloc[-1])
+    last_vs_ma5 = round(last_gg - long_ma, 2)
+    return {'label': label, 'delta_short_vs_long': delta, 'momentum': momentum, 'stress': stress, 'last_gg': last_gg, 'last_vs_ma5': last_vs_ma5}
 
 
 def build_model_diagnostics(df):
@@ -692,8 +722,14 @@ if not df.empty:
     st.dataframe(forecast['details'], use_container_width=True, hide_index=True)
 
     trend_chart_df = build_trend_visual_df(df)
-    heatmap_df = build_heatmap_pivot(df)
-    orario_gg_df = build_orario_gg_table(df)
+    trend_status = build_trend_status(df)
+
+    tr1, tr2, tr3, tr4 = st.columns(4)
+    tr1.metric('Stato trend', trend_status['label'])
+    tr2.metric('Delta MA3 vs MA5', trend_status['delta_short_vs_long'])
+    tr3.metric('Momento 4+ GG', trend_status['momentum'])
+    tr4.metric('Stress <=2 GG', trend_status['stress'])
+    st.caption(f"Ultimo blocco: {trend_status['last_gg']} GG | Scostamento vs MA5: {trend_status['last_vs_ma5']}")
 
     st.markdown('#### GG per blocco con medie mobili')
     if not trend_chart_df.empty:
@@ -711,19 +747,6 @@ if not df.empty:
         fig.update_yaxes(range=[0, 6], dtick=1)
         fig.update_xaxes(type='category', categoryorder='array', categoryarray=gg_chart['label_chart'].tolist(), tickangle=-90)
         st.plotly_chart(fig, use_container_width=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown('#### Heatmap GG per ciclo/giornata')
-        if not heatmap_df.empty:
-            heatmap_show = heatmap_df.fillna('-')
-            st.dataframe(heatmap_show, use_container_width=True)
-            st.caption('Lettura semplice: righe = cicli, colonne = giornate, cella = numero GG usciti in quella giornata. Valori alti = blocco più caldo.')
-        else:
-            st.info('Nessun dato disponibile.')
-    with c2:
-        st.markdown('#### Tabella orario e GG per giornata')
-        st.dataframe(orario_gg_df, use_container_width=True, hide_index=True)
 
     st.subheader('Pattern combinazioni per posizione')
     target_pattern_gg = st.slider('Numero GG da usare per i pattern posizione', min_value=1, max_value=6, value=3, step=1)
