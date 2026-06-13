@@ -11,7 +11,7 @@ import streamlit as st
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('VERSIONE CODICE: 2026-06-10 21:01 - v7 trend restore no extra tables')
+st.caption('VERSIONE CODICE: 2026-06-13 12:53 - v8 container under chart')
 st.caption('Storico Sisal, forecast blocchi, heatmap, ranking manuale, export, storico pronostici, ROI e bankroll tracker.')
 
 LOCAL_TZ_OFFSET_HOURS = 1
@@ -748,6 +748,22 @@ if not df.empty:
         fig.update_xaxes(type='category', categoryorder='array', categoryarray=gg_chart['label_chart'].tolist(), tickangle=-90)
         st.plotly_chart(fig, use_container_width=True)
 
+    with st.expander('Partite giorno per giorno', expanded=False):
+        storico_df = df[['cycle_id', 'giornata', 'group_label', 'match_nel_blocco', 'orario', 'codice_avvenimento', 'descrizione_avventimento', 'esito', 'group_key', 'sort_timestamp']].copy()
+        block_order = storico_df.groupby('group_key', dropna=False).agg(last_ts=('sort_timestamp', 'max'), group_label=('group_label', 'first')).reset_index(drop=True).sort_values('last_ts', ascending=False, kind='stable')
+        ordered_labels = block_order['group_label'].tolist()
+        for label in ordered_labels:
+            blocco_g = storico_df[storico_df['group_label'] == label].copy().sort_values(['match_nel_blocco', 'orario', 'codice_avvenimento'], kind='stable').reset_index(drop=True)
+            gg_count = int((blocco_g['esito'] == 'GOL').sum())
+            ng_count = int((blocco_g['esito'] == 'NO GOL').sum())
+            giornata_value = int(blocco_g['giornata'].iloc[0]) if not blocco_g.empty else 0
+            with st.expander(f'Giornata {giornata_value} · Partite {len(blocco_g)} · GG {gg_count} · NG {ng_count}', expanded=False):
+                st.dataframe(
+                    blocco_g[['match_nel_blocco', 'orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].rename(columns={'match_nel_blocco': 'n_match'}),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
     st.subheader('Pattern combinazioni per posizione')
     target_pattern_gg = st.slider('Numero GG da usare per i pattern posizione', min_value=1, max_value=6, value=3, step=1)
     pattern_info = build_position_pattern_suggestions(df, target_pattern_gg)
@@ -774,21 +790,6 @@ if not df.empty:
     st.subheader('Backtest dettagli')
     st.dataframe(backtest['table'], use_container_width=True, hide_index=True)
 
-    with st.expander('Partite giorno per giorno', expanded=False):
-        storico_df = df[['cycle_id', 'giornata', 'group_label', 'match_nel_blocco', 'orario', 'codice_avvenimento', 'descrizione_avventimento', 'esito', 'group_key', 'sort_timestamp']].copy()
-        block_order = storico_df.groupby('group_key', dropna=False).agg(last_ts=('sort_timestamp', 'max'), group_label=('group_label', 'first')).reset_index(drop=True).sort_values('last_ts', ascending=False, kind='stable')
-        ordered_labels = block_order['group_label'].tolist()
-        for label in ordered_labels:
-            blocco_g = storico_df[storico_df['group_label'] == label].copy().sort_values(['match_nel_blocco', 'orario', 'codice_avvenimento'], kind='stable').reset_index(drop=True)
-            gg_count = int((blocco_g['esito'] == 'GOL').sum())
-            ng_count = int((blocco_g['esito'] == 'NO GOL').sum())
-            giornata_value = int(blocco_g['giornata'].iloc[0]) if not blocco_g.empty else 0
-            with st.expander(f'Giornata {giornata_value} · Partite {len(blocco_g)} · GG {gg_count} · NG {ng_count}', expanded=False):
-                st.dataframe(
-                    blocco_g[['match_nel_blocco', 'orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].rename(columns={'match_nel_blocco': 'n_match'}),
-                    use_container_width=True,
-                    hide_index=True
-                )
 else:
     st.info("Premi 'Aggiorna risultati' per caricare i dati storici del giorno.")
 
