@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('VERSIONE CODICE: 2026-06-09 22:00 - label_chart_fix')
+st.caption('VERSIONE CODICE: 2026-06-14 17:31 - advice block added')
 st.caption(
     'Archivio risultati Sisal con giornate Sisal 1-22 senza duplicati, cicli distinti, '
     'forecast su blocchi da 6, ranking manuale GG/NG e reset giornaliero dopo l\'1:00'
@@ -1078,6 +1078,139 @@ else:
         f"Giorno dati attivo: {st.session_state.get('active_data_day')} | "
         f"Data API usata: {api_day_used}"
     )
+
+
+
+
+def build_team_outcome_stats(history_df):
+    if history_df is None or history_df.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, r in history_df.iterrows():
+        home = str(r.get('home_team', '')).strip()
+        away = str(r.get('away_team', '')).strip()
+        hg = r.get('home_goals')
+        ag = r.get('away_goals')
+        dt = r.get('match_dt')
+        if not home or not away or pd.isna(hg) or pd.isna(ag):
+            continue
+        hg = int(hg)
+        ag = int(ag)
+        if hg > ag:
+            home_res, away_res = 'W', 'L'
+        elif hg < ag:
+            home_res, away_res = 'L', 'W'
+        else:
+            home_res = away_res = 'D'
+        rows.append({'team': home, 'venue': 'H', 'result': home_res, 'gf': hg, 'ga': ag, 'scored': int(hg > 0), 'conceded': int(ag > 0), 'btts': int(hg > 0 and ag > 0), 'match_dt': dt})
+        rows.append({'team': away, 'venue': 'A', 'result': away_res, 'gf': ag, 'ga': hg, 'scored': int(ag > 0), 'conceded': int(hg > 0), 'btts': int(hg > 0 and ag > 0), 'match_dt': dt})
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values('match_dt').reset_index(drop=True)
+
+
+def team_streak_summary(team_df):
+    if team_df is None or team_df.empty:
+        return {}
+    team_df = team_df.sort_values('match_dt').reset_index(drop=True)
+
+    def count_back(series, predicate):
+        c = 0
+        for value in list(series)[::-1]:
+            if predicate(value):
+                c += 1
+            else:
+                break
+        return c
+
+    return {
+        'matches': len(team_df),
+        'win_rate': float((team_df['result'] == 'W').mean()),
+        'draw_rate': float((team_df['result'] == 'D').mean()),
+        'loss_rate': float((team_df['result'] == 'L').mean()),
+        'scored_rate': float(team_df['scored'].mean()),
+        'conceded_rate': float(team_df['conceded'].mean()),
+        'btts_rate': float(team_df['btts'].mean()),
+        'streak_no_draw': count_back(team_df['result'], lambda x: x != 'D'),
+        'streak_scored': count_back(team_df['scored'], lambda x: x == 1),
+        'streak_conceded': count_back(team_df['conceded'], lambda x: x == 1),
+        'streak_btts': count_back(team_df['btts'], lambda x: x == 1),
+    }
+
+
+def build_next_block_advice(parsed_df, history_df):
+    team_df = build_team_outcome_stats(history_df)
+    if parsed_df is None or parsed_df.empty or team_df.empty:
+        return pd.DataFrame()
+    tips = []
+    for _, r in parsed_df.iterrows():
+        home = str(r.get('home_team', '')).strip()
+        away = str(r.get('away_team', '')).strip()
+        match_name = str(r.get('match', f'{home} {away}')).strip()
+        home_stats = team_streak_summary(team_df[team_df['team'].str.lower() == home.lower()])
+        away_stats = team_streak_summary(team_df[team_df['team'].str.lower() == away.lower()])
+        if not home_stats or not away_stats:
+            continue
+
+        reasons = []
+        strength = 0.0
+        market = 'GG'
+
+        if home_stats['streak_no_draw'] >= 6:
+            reasons.append(f"{home} non pareggia da {home_stats['streak_no_draw']} partite")
+            strength += 1.0
+        if away_stats['streak_no_draw'] >= 6:
+            reasons.append(f"{away} non pareggia da {away_stats['streak_no_draw']} partite")
+            strength += 1.0
+        if home_stats['streak_scored'] >= 4:
+            reasons.append(f"{home} segna da {home_stats['streak_scored']} partite")
+            strength += 0.9
+        if away_stats['streak_scored'] >= 4:
+            reasons.append(f"{away} segna da {away_stats['streak_scored']} partite")
+            strength += 0.9
+        if home_stats['streak_conceded'] >= 4:
+            reasons.append(f"{home} subisce da {home_stats['streak_conceded']} partite")
+            strength += 0.8
+        if away_stats['streak_conceded'] >= 4:
+            reasons.append(f"{away} subisce da {away_stats['streak_conceded']} partite")
+            strength += 0.8
+        if home_stats['btts_rate'] >= 0.65:
+            reasons.append(f"{home} ha GG nel {home_stats['btts_rate']*100:.0f}% delle gare")
+            strength += 0.8
+        if away_stats['btts_rate'] >= 0.65:
+            reasons.append(f"{away} ha GG nel {away_stats['btts_rate']*100:.0f}% delle gare")
+            strength += 0.8
+
+        if home_stats['win_rate'] >= 0.6 and away_stats['loss_rate'] >= 0.5:
+            market = '1'
+            reasons.append(f"{home} vince spesso e {away} perde spesso")
+            strength += 1.2
+        elif away_stats['win_rate'] >= 0.6 and home_stats['loss_rate'] >= 0.5:
+            market = '2'
+            reasons.append(f"{away} vince spesso e {home} perde spesso")
+            strength += 1.2
+        elif home_stats['draw_rate'] >= 0.35 and away_stats['draw_rate'] >= 0.35:
+            market = 'X'
+            reasons.append('entrambe hanno profilo frequente da pareggio')
+            strength += 0.7
+        else:
+            market = 'GG'
+
+        if not reasons:
+            reasons.append('pochi segnali forti, partita da monitorare')
+
+        tips.append({
+            'match': match_name,
+            'mercato_consigliato': market,
+            'forza_tip': round(strength, 2),
+            'consiglio': f"Gioca {market} su {match_name}: " + '; '.join(reasons[:3]) + '.',
+            'segnali': '; '.join(reasons[:4])
+        })
+
+    if not tips:
+        return pd.DataFrame()
+    return pd.DataFrame(tips).sort_values(['forza_tip', 'match'], ascending=[False, True]).reset_index(drop=True)
 
 
 # -------------------------
