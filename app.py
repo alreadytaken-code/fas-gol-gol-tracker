@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('VERSIONE CODICE: 2026-06-14 17:31 - advice block added')
+st.caption('VERSIONE CODICE: 2026-06-14 17:40 - clean + team stats')
 st.caption(
     'Archivio risultati Sisal con giornate Sisal 1-22 senza duplicati, cicli distinti, '
     'forecast su blocchi da 6, ranking manuale GG/NG e reset giornaliero dopo l\'1:00'
@@ -663,6 +663,67 @@ def build_orario_gg_table(df):
     return out
 
 
+
+
+def build_team_outcome_stats(history_df):
+    valid_df = ensure_block_columns(get_valid_matches_df(history_df))
+    cols = [
+        'team', 'venue', 'result', 'gf', 'ga', 'scored', 'conceded', 'btts',
+        'group_label', 'giornata', 'cycle_id', 'match_dt'
+    ]
+    if valid_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    rows = []
+    for _, r in valid_df.iterrows():
+        home = str(r.get('home_team', '')).strip()
+        away = str(r.get('away_team', '')).strip()
+        esito = str(r.get('esito', '')).strip().upper()
+        dt = r.get('sort_timestamp')
+        giornata = r.get('giornata')
+        cycle_id = r.get('cycle_id')
+        group_label = r.get('group_label')
+        home_scored = 1 if esito == 'GOL' else 0
+        away_scored = 1 if esito == 'GOL' else 0
+        btts = 1 if esito == 'GOL' else 0
+        rows.append({
+            'team': home, 'venue': 'Casa', 'result': None, 'gf': home_scored, 'ga': away_scored,
+            'scored': home_scored, 'conceded': away_scored, 'btts': btts,
+            'group_label': group_label, 'giornata': giornata, 'cycle_id': cycle_id, 'match_dt': dt
+        })
+        rows.append({
+            'team': away, 'venue': 'Trasferta', 'result': None, 'gf': away_scored, 'ga': home_scored,
+            'scored': away_scored, 'conceded': home_scored, 'btts': btts,
+            'group_label': group_label, 'giornata': giornata, 'cycle_id': cycle_id, 'match_dt': dt
+        })
+    return pd.DataFrame(rows)
+
+
+def team_stats_table(history_df):
+    team_df = build_team_outcome_stats(history_df)
+    if team_df.empty:
+        return pd.DataFrame(columns=[
+            'team', 'matches', 'gf', 'ga', 'avg_gf', 'avg_ga', 'scored_rate', 'conceded_rate', 'btts_rate'
+        ])
+    out = team_df.groupby('team').agg(
+        matches=('team', 'count'),
+        gf=('gf', 'sum'),
+        ga=('ga', 'sum'),
+        avg_gf=('gf', 'mean'),
+        avg_ga=('ga', 'mean'),
+        scored_rate=('scored', 'mean'),
+        conceded_rate=('conceded', 'mean'),
+        btts_rate=('btts', 'mean')
+    ).reset_index()
+    out['clean_sheet_rate'] = 1 - out['conceded_rate']
+    out['no_score_rate'] = 1 - out['scored_rate']
+    pct_cols = ['scored_rate', 'conceded_rate', 'btts_rate', 'clean_sheet_rate', 'no_score_rate']
+    for c in pct_cols:
+        out[c] = (out[c] * 100).round(2)
+    out['avg_gf'] = out['avg_gf'].round(2)
+    out['avg_ga'] = out['avg_ga'].round(2)
+    return out.sort_values(['btts_rate', 'scored_rate', 'team'], ascending=[False, False, True]).reset_index(drop=True)
+
 # -------------------------
 # Predict Top-N
 # -------------------------
@@ -1023,51 +1084,70 @@ if not df.empty:
     with st.expander('Dettaglio backtest', expanded=False):
         st.dataframe(backtest['table'], use_container_width=True, hide_index=True)
 
+    st.subheader('Partite giorno per giorno')
+    storico_df = ensure_block_columns(df)[[
+        'cycle_id', 'giornata', 'group_label', 'match_nel_blocco', 'orario',
+        'codice_avvenimento', 'descrizione_avventimento', 'esito', 'group_key', 'sort_timestamp'
+    ]].copy()
+
+    block_order = (
+        storico_df.groupby('group_key', dropna=False)
+        .agg(last_ts=('sort_timestamp', 'max'), group_label=('group_label', 'first'))
+        .reset_index(drop=True)
+        .sort_values('last_ts', ascending=False, kind='stable')
+    )
+    ordered_labels = block_order['group_label'].tolist()
+
+    if ordered_labels:
+        for label in ordered_labels:
+            blocco_g = storico_df[storico_df['group_label'] == label].copy()
+            blocco_g = blocco_g.sort_values(['match_nel_blocco', 'orario', 'codice_avvenimento'], ascending=[True, True, True], kind='stable').reset_index(drop=True)
+            gg_count = int((blocco_g['esito'] == 'GOL').sum())
+            ng_count = int((blocco_g['esito'] == 'NO GOL').sum())
+            giornata_value = int(blocco_g['giornata'].iloc[0]) if not blocco_g.empty else 0
+            ciclo_value = int(blocco_g['cycle_id'].iloc[0]) if not blocco_g.empty else 0
+            with st.expander(
+                f'Giornata {giornata_value} · Ciclo {ciclo_value} · Partite {len(blocco_g)} · GG {gg_count} · NG {ng_count}',
+                expanded=False
+            ):
+                st.dataframe(
+                    blocco_g[['match_nel_blocco', 'orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].rename(columns={'match_nel_blocco': 'n_match'}),
+                    use_container_width=True,
+                    hide_index=True
+                )
+    else:
+        st.info('Nessun blocco disponibile.')
+
     st.subheader('Blocchi con 6 GG su 6')
     all_gg_stats = build_all_gg_stats(df)
     col4, col5 = st.columns(2)
     col4.metric('Totale blocchi 6 su 6', all_gg_stats['total_all_gg_blocks'])
     col5.metric('Serie aperta 6 su 6', all_gg_stats['latest_streak'])
 
-    with st.expander('Dettaglio blocchi 6 GG su 6', expanded=False):
-        st.dataframe(all_gg_stats['blocks_table'], use_container_width=True, hide_index=True)
-
-    with st.expander('Partite giorno per giorno', expanded=False):
-        storico_df = ensure_block_columns(df)[[
-            'cycle_id', 'giornata', 'group_label', 'match_nel_blocco', 'orario',
-            'codice_avvenimento', 'descrizione_avventimento', 'esito', 'group_key', 'sort_timestamp'
-        ]].copy()
-
-        block_order = (
-            storico_df.groupby('group_key', dropna=False)
-            .agg(last_ts=('sort_timestamp', 'max'), group_label=('group_label', 'first'))
-            .reset_index(drop=True)
-            .sort_values('last_ts', ascending=False, kind='stable')
-        )
-        ordered_labels = block_order['group_label'].tolist()
-
-        if ordered_labels:
-            for label in ordered_labels:
-                blocco_g = storico_df[storico_df['group_label'] == label].copy()
-                blocco_g = blocco_g.sort_values(['match_nel_blocco', 'orario', 'codice_avvenimento'], ascending=[True, True, True], kind='stable').reset_index(drop=True)
-                gg_count = int((blocco_g['esito'] == 'GOL').sum())
-                ng_count = int((blocco_g['esito'] == 'NO GOL').sum())
-                giornata_value = int(blocco_g['giornata'].iloc[0]) if not blocco_g.empty else 0
-                ciclo_value = int(blocco_g['cycle_id'].iloc[0]) if not blocco_g.empty else 0
-                with st.expander(
-                    f'Giornata {giornata_value} · Ciclo {ciclo_value} · Partite {len(blocco_g)} · GG {gg_count} · NG {ng_count}',
-                    expanded=False
-                ):
-                    st.dataframe(
-                        blocco_g[['match_nel_blocco', 'orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].rename(columns={'match_nel_blocco': 'n_match'}),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-        else:
-            st.info('Nessun blocco disponibile.')
+    perfect_rows = build_blocks(df)
+    perfect_rows = perfect_rows[(perfect_rows['partite'] >= MATCHES_PER_BLOCK) & (perfect_rows['GG'] == MATCHES_PER_BLOCK)].copy()
+    if perfect_rows.empty:
+        st.caption('Nessun blocco perfetto 6 GG su 6 per ora.')
+    else:
+        for _, row in perfect_rows.iterrows():
+            st.success(f"{row['group_label']} · 6 GG su 6 · ore {row['orario_inizio']}")
 
     st.subheader('Blocchi Sisal distinti')
     st.dataframe(build_blocks(df), use_container_width=True, hide_index=True)
+
+    st.subheader('Statistiche per squadra')
+    st.caption('Gol fatti/subiti, media gol, % segna, % subisce, % GG, clean sheet e no score sullo storico disponibile.')
+    team_table = team_stats_table(df)
+    if team_table.empty:
+        st.info('Nessuna statistica squadra disponibile.')
+    else:
+        squadre = sorted(team_table['team'].dropna().unique().tolist())
+        selected_team = st.selectbox('Seleziona squadra', ['(tutte)'] + squadre)
+        if selected_team == '(tutte)':
+            team_view = team_table.copy()
+        else:
+            team_view = team_table[team_table['team'] == selected_team].copy()
+        st.dataframe(team_view, use_container_width=True, hide_index=True)
 
 else:
     st.info(
@@ -1078,139 +1158,6 @@ else:
         f"Giorno dati attivo: {st.session_state.get('active_data_day')} | "
         f"Data API usata: {api_day_used}"
     )
-
-
-
-
-def build_team_outcome_stats(history_df):
-    if history_df is None or history_df.empty:
-        return pd.DataFrame()
-    rows = []
-    for _, r in history_df.iterrows():
-        home = str(r.get('home_team', '')).strip()
-        away = str(r.get('away_team', '')).strip()
-        hg = r.get('home_goals')
-        ag = r.get('away_goals')
-        dt = r.get('match_dt')
-        if not home or not away or pd.isna(hg) or pd.isna(ag):
-            continue
-        hg = int(hg)
-        ag = int(ag)
-        if hg > ag:
-            home_res, away_res = 'W', 'L'
-        elif hg < ag:
-            home_res, away_res = 'L', 'W'
-        else:
-            home_res = away_res = 'D'
-        rows.append({'team': home, 'venue': 'H', 'result': home_res, 'gf': hg, 'ga': ag, 'scored': int(hg > 0), 'conceded': int(ag > 0), 'btts': int(hg > 0 and ag > 0), 'match_dt': dt})
-        rows.append({'team': away, 'venue': 'A', 'result': away_res, 'gf': ag, 'ga': hg, 'scored': int(ag > 0), 'conceded': int(hg > 0), 'btts': int(hg > 0 and ag > 0), 'match_dt': dt})
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return out
-    return out.sort_values('match_dt').reset_index(drop=True)
-
-
-def team_streak_summary(team_df):
-    if team_df is None or team_df.empty:
-        return {}
-    team_df = team_df.sort_values('match_dt').reset_index(drop=True)
-
-    def count_back(series, predicate):
-        c = 0
-        for value in list(series)[::-1]:
-            if predicate(value):
-                c += 1
-            else:
-                break
-        return c
-
-    return {
-        'matches': len(team_df),
-        'win_rate': float((team_df['result'] == 'W').mean()),
-        'draw_rate': float((team_df['result'] == 'D').mean()),
-        'loss_rate': float((team_df['result'] == 'L').mean()),
-        'scored_rate': float(team_df['scored'].mean()),
-        'conceded_rate': float(team_df['conceded'].mean()),
-        'btts_rate': float(team_df['btts'].mean()),
-        'streak_no_draw': count_back(team_df['result'], lambda x: x != 'D'),
-        'streak_scored': count_back(team_df['scored'], lambda x: x == 1),
-        'streak_conceded': count_back(team_df['conceded'], lambda x: x == 1),
-        'streak_btts': count_back(team_df['btts'], lambda x: x == 1),
-    }
-
-
-def build_next_block_advice(parsed_df, history_df):
-    team_df = build_team_outcome_stats(history_df)
-    if parsed_df is None or parsed_df.empty or team_df.empty:
-        return pd.DataFrame()
-    tips = []
-    for _, r in parsed_df.iterrows():
-        home = str(r.get('home_team', '')).strip()
-        away = str(r.get('away_team', '')).strip()
-        match_name = str(r.get('match', f'{home} {away}')).strip()
-        home_stats = team_streak_summary(team_df[team_df['team'].str.lower() == home.lower()])
-        away_stats = team_streak_summary(team_df[team_df['team'].str.lower() == away.lower()])
-        if not home_stats or not away_stats:
-            continue
-
-        reasons = []
-        strength = 0.0
-        market = 'GG'
-
-        if home_stats['streak_no_draw'] >= 6:
-            reasons.append(f"{home} non pareggia da {home_stats['streak_no_draw']} partite")
-            strength += 1.0
-        if away_stats['streak_no_draw'] >= 6:
-            reasons.append(f"{away} non pareggia da {away_stats['streak_no_draw']} partite")
-            strength += 1.0
-        if home_stats['streak_scored'] >= 4:
-            reasons.append(f"{home} segna da {home_stats['streak_scored']} partite")
-            strength += 0.9
-        if away_stats['streak_scored'] >= 4:
-            reasons.append(f"{away} segna da {away_stats['streak_scored']} partite")
-            strength += 0.9
-        if home_stats['streak_conceded'] >= 4:
-            reasons.append(f"{home} subisce da {home_stats['streak_conceded']} partite")
-            strength += 0.8
-        if away_stats['streak_conceded'] >= 4:
-            reasons.append(f"{away} subisce da {away_stats['streak_conceded']} partite")
-            strength += 0.8
-        if home_stats['btts_rate'] >= 0.65:
-            reasons.append(f"{home} ha GG nel {home_stats['btts_rate']*100:.0f}% delle gare")
-            strength += 0.8
-        if away_stats['btts_rate'] >= 0.65:
-            reasons.append(f"{away} ha GG nel {away_stats['btts_rate']*100:.0f}% delle gare")
-            strength += 0.8
-
-        if home_stats['win_rate'] >= 0.6 and away_stats['loss_rate'] >= 0.5:
-            market = '1'
-            reasons.append(f"{home} vince spesso e {away} perde spesso")
-            strength += 1.2
-        elif away_stats['win_rate'] >= 0.6 and home_stats['loss_rate'] >= 0.5:
-            market = '2'
-            reasons.append(f"{away} vince spesso e {home} perde spesso")
-            strength += 1.2
-        elif home_stats['draw_rate'] >= 0.35 and away_stats['draw_rate'] >= 0.35:
-            market = 'X'
-            reasons.append('entrambe hanno profilo frequente da pareggio')
-            strength += 0.7
-        else:
-            market = 'GG'
-
-        if not reasons:
-            reasons.append('pochi segnali forti, partita da monitorare')
-
-        tips.append({
-            'match': match_name,
-            'mercato_consigliato': market,
-            'forza_tip': round(strength, 2),
-            'consiglio': f"Gioca {market} su {match_name}: " + '; '.join(reasons[:3]) + '.',
-            'segnali': '; '.join(reasons[:4])
-        })
-
-    if not tips:
-        return pd.DataFrame()
-    return pd.DataFrame(tips).sort_values(['forza_tip', 'match'], ascending=[False, True]).reset_index(drop=True)
 
 
 # -------------------------
