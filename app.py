@@ -932,3 +932,4 @@ else:
         st.write(
             "Reset giornaliero: dopo l'1:00, se il giorno è cambiato, lo storico viene azzerato automaticamente "
             "alla prima pressione di 'Aggiorna risultati'."
+        )
