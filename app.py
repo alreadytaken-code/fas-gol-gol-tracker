@@ -6,11 +6,12 @@ import pandas as pd
 import requests
 import streamlit as st
 import plotly.graph_objects as go
+import altair as alt
 
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('VERSIONE CODICE: 2026-06-14 17:40 - clean + team stats')
+st.caption('VERSIONE CODICE: 2026-07-04 15:51 - clean + team stats + over 2.5 blocchi')
 st.caption(
     'Archivio risultati Sisal con giornate Sisal 1-22 senza duplicati, cicli distinti, '
     'forecast su blocchi da 6, ranking manuale GG/NG e reset giornaliero dopo l\'1:00'
@@ -1134,6 +1135,44 @@ if not df.empty:
 
     st.subheader('Blocchi Sisal distinti')
     st.dataframe(build_blocks(df), use_container_width=True, hide_index=True)
+
+    st.subheader('Over 2.5 per blocco (>= 3 GG su 6)')
+    blocks_df = build_blocks(df)
+    over_stats = build_over25_stats(blocks_df)
+
+    col_o1, col_o2, col_o3 = st.columns(3)
+    col_o1.metric('Blocchi totali', over_stats['total_blocks'])
+    col_o2.metric('Blocchi over 2.5 (>=3 GG)', over_stats['over25_blocks'])
+    col_o3.metric('Rate over 2.5', f"{over_stats['over25_rate']*100:.1f}%")
+
+    if over_stats['total_blocks'] > 0:
+        over_blocks = over_stats['blocks_table'][['cycle_id', 'giornata', 'group_label', 'GG', 'over25_flag']].copy()
+        over_blocks['over25_label'] = over_blocks['over25_flag'].map({0: 'NO', 1: 'SI'})
+
+        st.caption('Grafico blocchi over 2.5 (>=3 GG su 6) per ciclo/giornata')
+        chart_df = over_blocks.copy()
+        chart_df['over25_flag'] = chart_df['over25_flag'].astype(int)
+        over_chart = alt.Chart(chart_df).mark_bar().encode(
+            x=alt.X('cycle_id:N', title='Ciclo'),
+            y=alt.Y('sum(over25_flag):Q', title='Blocchi over 2.5 per ciclo'),
+            tooltip=['cycle_id', 'giornata', 'group_label', 'GG', 'over25_label']
+        ).properties(height=260)
+        st.altair_chart(over_chart, use_container_width=True)
+
+        st.caption('Heatmap over 2.5 per ciclo/giornata (conteggio blocchi >=3 GG)')
+        heat_df = chart_df.groupby(['cycle_id', 'giornata'], dropna=False)['over25_flag'].sum().reset_index()
+        heat_df['cycle_id'] = heat_df['cycle_id'].astype(str)
+        heat_df['giornata'] = heat_df['giornata'].astype(str)
+
+        heat_chart = alt.Chart(heat_df).mark_rect().encode(
+            x=alt.X('cycle_id:N', title='Ciclo'),
+            y=alt.Y('giornata:N', title='Giornata'),
+            color=alt.Color('over25_flag:Q', title='Blocchi over 2.5'),
+            tooltip=['cycle_id', 'giornata', 'over25_flag']
+        ).properties(height=260)
+        st.altair_chart(heat_chart, use_container_width=True)
+    else:
+        st.info('Nessun blocco disponibile per il calcolo over 2.5.')
 
     st.subheader('Statistiche per squadra')
     st.caption('Gol fatti/subiti, media gol, % segna, % subisce, % GG, clean sheet e no score sullo storico disponibile.')
