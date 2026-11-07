@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('VERSIONE CODICE: 2026-11-07 - tab Panoramica / Storico GG (con squadre) / Pattern / Gol totali')
+st.caption('VERSIONE CODICE: 2026-11-07 - aggiunto tab Quote vs risultato')
 st.caption(
     'Archivio risultati Sisal · giornate 1-22 senza duplicati · blocchi da 6 · '
     'reset giornaliero dopo l\'1:00'
@@ -133,7 +133,48 @@ def extract_goals(ev, result_list):
     return None, None, None
 
 
-GOAL_KEYS = ('gol_casa', 'gol_trasferta', 'gol_totali')
+GOAL_KEYS = ('gol_casa', 'gol_trasferta', 'gol_totali', 'quota_gg', 'quota_ng')
+
+
+def _to_float(v):
+    try:
+        x = float(str(v).replace(',', '.'))
+    except Exception:
+        return None
+    if x >= 20:
+        x = x / 100
+    return x if x > 1.0 else None
+
+
+def extract_gg_odds(ev, result_list):
+    """Cerca la quota del GG e dell'NG nell'evento. Ritorna (quota_gg, quota_ng), None se assenti."""
+    q_gg = q_ng = None
+    for rr in result_list:
+        if not isinstance(rr, dict):
+            continue
+        market = str(rr.get('descrizioneScommessa') or rr.get('modelloScommessa') or '').lower()
+        result = str(rr.get('risultato') or rr.get('descrizioneEsito') or '').strip().lower()
+        if not ('goal/no goal' in market or 'gol/no gol' in market) or ' + ' in result:
+            continue
+        quota = next((_to_float(v) for k, v in rr.items() if 'quota' in str(k).lower() and _to_float(v)), None)
+        if quota is None:
+            continue
+        if result in ('goal', 'gol', 'gg'):
+            q_gg = q_gg or quota
+        elif result in ('no goal', 'no gol', 'nogol', 'ng'):
+            q_ng = q_ng or quota
+    for k, v in ev.items():
+        kl = str(k).lower()
+        if 'quota' not in kl or isinstance(v, (dict, list)):
+            continue
+        f = _to_float(v)
+        if f is None:
+            continue
+        if 'nogol' in kl or 'nogoal' in kl or 'ng' in kl:
+            q_ng = q_ng or f
+        elif 'gol' in kl or 'goal' in kl or 'gg' in kl:
+            q_gg = q_gg or f
+    return q_gg, q_ng
 
 
 def get_event_description(ev):
@@ -230,6 +271,7 @@ def fetch_matches():
                     esito = infer_gol_gol(result_list)
                     dt_value, orario = parse_datetime_fields(date_str, data_ora)
                     goals = extract_goals(ev, result_list)
+                    odds = extract_gg_odds(ev, result_list)
                     mercati = [
                         f"{rr.get('descrizioneScommessa') or rr.get('modelloScommessa')} = "
                         f"{rr.get('risultato') or rr.get('descrizioneEsito')}"
@@ -252,6 +294,9 @@ def fetch_matches():
                         'gol_casa': goals[0],
                         'gol_trasferta': goals[1],
                         'gol_totali': goals[2],
+                        'quota_gg': odds[0],
+                        'quota_ng': odds[1],
+                        'rr_keys': sorted({str(k) for rr in result_list if isinstance(rr, dict) for k in rr.keys()}),
                         'mercati': mercati,
                         'ev_keys': sorted(str(k) for k in ev.keys()),
                     })
@@ -269,6 +314,7 @@ def fetch_matches():
                 if best.get(gk) is None and other.get(gk) is not None:
                     best[gk] = other[gk]
             best['mercati'] = sorted(set(best.get('mercati') or []) | set(other.get('mercati') or []))[:40]
+            best['rr_keys'] = sorted(set(best.get('rr_keys') or []) | set(other.get('rr_keys') or []))
             dedup[m['match_id']] = best
 
     return list(dedup.values()), date_str
@@ -295,7 +341,8 @@ def prepare_matches_df(matches):
         'match_id', 'api_day', 'timestamp', 'timestamp_str', 'orario', 'giornata',
         'codice_palinsesto', 'codice_avvenimento', 'descrizione_avventimento',
         'home_team', 'away_team', 'esito',
-        'gol_casa', 'gol_trasferta', 'gol_totali', 'mercati', 'ev_keys'
+        'gol_casa', 'gol_trasferta', 'gol_totali', 'mercati', 'ev_keys',
+        'quota_gg', 'quota_ng', 'rr_keys'
     ]
     for col in required:
         if col not in df.columns:
@@ -1026,6 +1073,11 @@ def render_goals_diagnostics(df):
         keys = sorted({k for ks in df['ev_keys'] if isinstance(ks, list) for k in ks})
         st.markdown('**Campi dell\'evento restituiti dall\'API**')
         st.code(', '.join(keys) if keys else '(nessuno)')
+        if 'rr_keys' in df.columns:
+            rkeys = sorted({k for ks in df['rr_keys'] if isinstance(ks, list) for k in ks})
+            if rkeys:
+                st.markdown('**Campi di ogni risultato ufficiale**')
+                st.code(', '.join(rkeys))
         markets = {}
         if 'mercati' in df.columns:
             for ms in df['mercati']:
@@ -1101,6 +1153,98 @@ def render_gol_totali_tab(df):
 
 
 # -------------------------
+# Quota GG vs risultato reale
+# -------------------------
+def build_quota_df(df):
+    base = ensure_block_columns(get_valid_matches_df(df))
+    cols = ['group_label', 'orario', 'partita', 'quota_gg', 'gg', 'implicita']
+    if base.empty:
+        return pd.DataFrame(columns=cols)
+    work = base.copy()
+    if 'quota_gg' not in work.columns:
+        work['quota_gg'] = pd.NA
+    work['quota_gg'] = pd.to_numeric(work['quota_gg'], errors='coerce')
+    work = work[work['quota_gg'] > 1.0].copy()
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+    work['gg'] = (work['esito'] == 'GOL').astype(int)
+    work['implicita'] = 1 / work['quota_gg']
+    work['partita'] = work['descrizione_avventimento']
+    work['orario'] = work['orario'].fillna('').astype(str).str[:5]
+    return work[cols].reset_index(drop=True)
+
+
+def build_quota_bins(qdf):
+    """Fasce di quota (quantili): GG reali vs probabilità implicita e resa puntando sempre GG."""
+    cols = ['fascia', 'partite', 'gg_reali', 'implicita', 'scarto', 'resa']
+    if len(qdf) < 10:
+        return pd.DataFrame(columns=cols)
+    nb = int(min(5, max(2, len(qdf) // 20)))
+    bins = pd.qcut(qdf['quota_gg'], q=nb, duplicates='drop')
+    work = qdf.assign(fascia=bins)
+    work['profitto'] = work.apply(lambda r: (r['quota_gg'] - 1) if r['gg'] else -1.0, axis=1)
+    rows = []
+    for iv, g in work.groupby('fascia', observed=True):
+        rows.append({
+            'fascia': f'{iv.left:.2f}–{iv.right:.2f}',
+            'partite': len(g),
+            'gg_reali': round(g['gg'].mean() * 100, 1),
+            'implicita': round(g['implicita'].mean() * 100, 1),
+            'scarto': round((g['gg'].mean() - g['implicita'].mean()) * 100, 1),
+            'resa': round(g['profitto'].mean() * 100, 1),
+        })
+    return pd.DataFrame(rows)[cols]
+
+
+def render_quote_tab(df):
+    qdf = build_quota_df(df)
+    if qdf.empty:
+        st.warning(
+            "Non trovo le quote del GG nei dati restituiti dall'API (o il formato non è stato riconosciuto). "
+            "Premi 'Aggiorna risultati' e, se resta vuoto, qui sotto trovi cosa arriva davvero dall'API."
+        )
+        render_goals_diagnostics(df)
+        return
+
+    n = len(qdf)
+    gg_rate = qdf['gg'].mean()
+    impl = qdf['implicita'].mean()
+    corr = qdf['gg'].corr(qdf['quota_gg']) if qdf['gg'].nunique() > 1 and qdf['quota_gg'].nunique() > 1 else float('nan')
+    profit = qdf.apply(lambda r: (r['quota_gg'] - 1) if r['gg'] else -1.0, axis=1).mean()
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric('Partite con quota', n)
+    m2.metric('GG reali', f'{gg_rate:.1%}', f'{(gg_rate - impl) * 100:+.1f} pp vs quota')
+    m3.metric('Probabilità implicita media', f'{impl:.1%}')
+    m4.metric('Correlazione quota ↔ GG', 'n/d' if pd.isna(corr) else f'{corr:+.2f}')
+    st.caption(
+        f'Puntando sempre 1 unità sul GG la resa media sarebbe {profit * 100:+.1f}% per partita. '
+        'Correlazione vicino a 0 = la quota non dice nulla sull’esito; negativa = quota più bassa, GG più frequente. '
+        'Probabilità implicita = 1/quota (include il margine del bookmaker, quindi di norma è sopra la probabilità reale).'
+    )
+
+    bins = build_quota_bins(qdf)
+    if bins.empty:
+        st.info('Servono almeno 10 partite con quota per le fasce.')
+        return
+    fig = go.Figure()
+    fig.add_bar(x=bins['fascia'], y=bins['gg_reali'], name='GG reali %', marker_color='#16a34a')
+    fig.add_bar(x=bins['fascia'], y=bins['implicita'], name='Probabilità implicita %', marker_color='#38bdf8')
+    fig.update_layout(
+        barmode='group', height=340, margin=dict(t=10, b=10, l=10, r=10),
+        xaxis_title='Fascia di quota GG', yaxis_title='%', legend=dict(orientation='h', y=1.12)
+    )
+    fig.update_xaxes(type='category')
+    st.plotly_chart(fig, use_container_width=True, key='quote_bins')
+
+    shown = bins.rename(columns={
+        'fascia': 'Fascia quota GG', 'partite': 'Partite', 'gg_reali': 'GG reali %',
+        'implicita': 'Prob. implicita %', 'scarto': 'Scarto (pp)', 'resa': 'Resa su 1 unità %'
+    })
+    st.dataframe(shown, use_container_width=True, hide_index=True)
+
+
+# -------------------------
 # UI STORICO PRINCIPALE
 # -------------------------
 if 'active_data_day' not in st.session_state:
@@ -1142,8 +1286,8 @@ else:
         f"Data API usata: {api_day_used}"
     )
 
-    tab_ov, tab_gg, tab_pat, tab_goals = st.tabs([
-        'Panoramica', 'Storico GG', 'Pattern 2/3/4 GG', 'Gol totali'
+    tab_ov, tab_gg, tab_pat, tab_goals, tab_quote = st.tabs([
+        'Panoramica', 'Storico GG', 'Pattern 2/3/4 GG', 'Gol totali', 'Quote vs risultato'
     ])
 
     with tab_ov:
@@ -1222,3 +1366,6 @@ else:
 
     with tab_goals:
         render_gol_totali_tab(df)
+
+    with tab_quote:
+        render_quote_tab(df)
