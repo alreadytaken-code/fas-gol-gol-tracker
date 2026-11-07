@@ -839,42 +839,6 @@ def build_gg_history(df):
     return hist[cols]
 
 
-def build_position_rates(df):
-    """Quante volte il GG è uscito nel match 1, 2, ... 6 della giornata."""
-    out = pd.DataFrame({'posizione': list(range(1, MATCHES_PER_BLOCK + 1))})
-    base = ensure_block_columns(get_valid_matches_df(df))
-    if base.empty:
-        out['GG'] = 0
-        out['totale'] = 0
-        out['pct'] = 0.0
-        return out
-    base = base[base['match_nel_blocco'].between(1, MATCHES_PER_BLOCK)]
-    grp = base.groupby('match_nel_blocco')['esito'].agg(
-        totale='count', GG=lambda x: int((x == 'GOL').sum())
-    )
-    out = out.merge(grp, left_on='posizione', right_index=True, how='left').fillna(0)
-    out['GG'] = out['GG'].astype(int)
-    out['totale'] = out['totale'].astype(int)
-    out['pct'] = (out['GG'] / out['totale'].where(out['totale'] > 0) * 100).round(1).fillna(0.0)
-    return out
-
-
-def build_pattern_table(hist):
-    """Frequenza dei pattern (posizioni dei GG) sulle sole giornate complete."""
-    cols = ['pattern', 'n_gg', 'volte', 'pct', 'ultima_uscita']
-    if hist is None or hist.empty:
-        return pd.DataFrame(columns=cols), 0
-    complete = hist[hist['completa']]
-    if complete.empty:
-        return pd.DataFrame(columns=cols), 0
-    tbl = complete.groupby('pattern').agg(
-        n_gg=('GG', 'first'), volte=('seq', 'count'), ultima_uscita=('label', 'last')
-    ).reset_index()
-    tbl['pct'] = (tbl['volte'] / len(complete) * 100).round(1)
-    tbl = tbl.sort_values(['volte', 'n_gg', 'pattern'], ascending=[False, False, True], kind='stable')
-    return tbl[cols].reset_index(drop=True), len(complete)
-
-
 def pattern_to_text(pattern):
     if pattern == 'Nessuno':
         return 'nessun GG (6 NG)'
@@ -952,61 +916,6 @@ def render_storico_gg_tab(df):
     st.plotly_chart(fig, use_container_width=True)
     st.caption('Barre: rosso ≤2 GG, giallo 3 GG, verde 4+ GG. Griglia: ogni colonna è una giornata, ogni riga il match (1-6).')
 
-    st.markdown('#### Pattern di frequenza')
-    st.caption(
-        'Il pattern indica in quali match della giornata è uscito il GG: «1-2-3» = GG nel 1°, 2° e 3° match, '
-        'NG negli altri. Conteggio sulle sole giornate complete (6 match).'
-    )
-    pat_tbl, n_complete = build_pattern_table(hist)
-    if pat_tbl.empty:
-        st.info('Servono giornate complete (6 match) per calcolare i pattern.')
-    else:
-        top = pat_tbl.iloc[0]
-        ties = int((pat_tbl['volte'] == top['volte']).sum()) - 1
-        p1, p2, p3 = st.columns(3)
-        p1.metric('Pattern più frequente', top['pattern'])
-        p2.metric('Uscite', f"{int(top['volte'])} su {n_complete}")
-        p3.metric('Frequenza', f"{top['pct']:.1f}%")
-        extra = f' · pari merito con altri {ties} pattern' if ties > 0 and top['volte'] > 0 else ''
-        st.caption(f"Il più frequente: {pattern_to_text(top['pattern'])} · ultima uscita {top['ultima_uscita']}{extra}")
-
-        flt = st.selectbox(
-            'Filtra per numero di GG nella giornata',
-            ['Tutti'] + list(range(MATCHES_PER_BLOCK + 1)), key='gg_pattern_filter'
-        )
-        shown = pat_tbl if flt == 'Tutti' else pat_tbl[pat_tbl['n_gg'] == flt]
-        shown = shown.rename(columns={
-            'pattern': 'Pattern (match GG)', 'n_gg': 'N. GG', 'volte': 'Volte',
-            'pct': '% giornate', 'ultima_uscita': 'Ultima uscita'
-        })
-        st.dataframe(shown, use_container_width=True, hide_index=True, height=360)
-
-        cA, cB = st.columns(2)
-        with cA:
-            st.markdown('##### GG per posizione del match')
-            pos = build_position_rates(df)
-            figp = go.Figure(go.Bar(
-                x=pos['posizione'], y=pos['pct'], marker_color='#16a34a',
-                text=[f'{v:.0f}%' for v in pos['pct']], textposition='outside',
-                hovertemplate='Match %{x}<br>%{y}% GG<extra></extra>'
-            ))
-            figp.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10), xaxis_title='Match n.', yaxis_title='% GG')
-            figp.update_xaxes(dtick=1)
-            figp.update_yaxes(range=[0, 110])
-            st.plotly_chart(figp, use_container_width=True)
-        with cB:
-            st.markdown('##### Distribuzione GG per giornata')
-            dist = hist[hist['completa']]['GG'].value_counts().reindex(range(MATCHES_PER_BLOCK + 1), fill_value=0)
-            figd = go.Figure(go.Bar(
-                x=dist.index, y=dist.values, marker_color='#38bdf8',
-                text=dist.values, textposition='outside',
-                hovertemplate='%{x} GG<br>%{y} giornate<extra></extra>'
-            ))
-            figd.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10), xaxis_title='GG nella giornata', yaxis_title='Giornate')
-            figd.update_xaxes(dtick=1)
-            st.plotly_chart(figd, use_container_width=True)
-
-
 
 # -------------------------
 # Pattern 2/3/4 GG + gol totali per partita
@@ -1047,12 +956,12 @@ def render_pattern_tab(df):
         return
 
     st.caption(
-        'Per 3 e 4 GG vedi quali match della giornata (1-6) sono più spesso GG insieme. '
+        'Per 2, 3 e 4 GG vedi quali match della giornata (1-6) sono più spesso GG insieme. '
         '«Volte» conta le giornate in cui quei match sono stati tutti GG (anche con altri GG nella stessa giornata); '
         '«Volte esatte» solo quelle in cui i GG erano esattamente quei match. Solo giornate complete.'
     )
-    tabs = st.tabs(['3 GG', '4 GG'])
-    for k, tab in zip((3, 4), tabs):
+    tabs = st.tabs(['2 GG', '3 GG', '4 GG'])
+    for k, tab in zip((2, 3, 4), tabs):
         with tab:
             tbl, n = build_combo_table(hist, k)
             top = tbl.iloc[0]
@@ -1238,7 +1147,7 @@ else:
     )
 
     tab_ov, tab_gg, tab_pat, tab_goals = st.tabs([
-        'Panoramica', 'Storico GG', 'Pattern 3/4 GG', 'Gol totali'
+        'Panoramica', 'Storico GG', 'Pattern 2/3/4 GG', 'Gol totali'
     ])
 
     with tab_ov:
