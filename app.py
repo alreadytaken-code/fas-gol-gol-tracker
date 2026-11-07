@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('VERSIONE CODICE: 2026-11-07 - pattern 2/3/4 GG + gol totali, senza predict')
+st.caption('VERSIONE CODICE: 2026-11-07 - pattern 3/4 GG + gol totali per giornata')
 st.caption(
     'Archivio risultati Sisal · giornate 1-22 senza duplicati · blocchi da 6 · '
     'reset giornaliero dopo l\'1:00'
@@ -1047,12 +1047,12 @@ def render_pattern_tab(df):
         return
 
     st.caption(
-        'Per ogni numero di GG (2, 3, 4) vedi quali match della giornata (1-6) sono più spesso GG insieme. '
+        'Per 3 e 4 GG vedi quali match della giornata (1-6) sono più spesso GG insieme. '
         '«Volte» conta le giornate in cui quei match sono stati tutti GG (anche con altri GG nella stessa giornata); '
         '«Volte esatte» solo quelle in cui i GG erano esattamente quei match. Solo giornate complete.'
     )
-    tabs = st.tabs(['2 GG', '3 GG', '4 GG'])
-    for k, tab in zip((2, 3, 4), tabs):
+    tabs = st.tabs(['3 GG', '4 GG'])
+    for k, tab in zip((3, 4), tabs):
         with tab:
             tbl, n = build_combo_table(hist, k)
             top = tbl.iloc[0]
@@ -1177,11 +1177,22 @@ def render_gol_totali_tab(df):
     keys = tbl['group_key'].drop_duplicates().tolist()
     if window != 'Tutte':
         keys = keys[:int(window.split()[1])]
-    shown = tbl[tbl['group_key'].isin(keys)].drop(columns=['group_key']).rename(columns={
-        'n_match': 'N. match', 'partita': 'Partita', 'risultato': 'Risultato', 'gol_totali': 'Gol totali',
-        'ciclo': 'Ciclo', 'giornata': 'Giornata', 'orario': 'Orario', 'esito': 'Esito'
-    })
-    st.dataframe(shown, use_container_width=True, hide_index=True, height=480)
+    for key in keys:
+        g = tbl[tbl['group_key'] == key].sort_values('n_match')
+        first = g.iloc[0]
+        has_goals = g['gol_totali'].notna().any()
+        giornata_goals = int(g['gol_totali'].dropna().astype(int).sum()) if has_goals else '-'
+        gg_count = int((g['esito'] == 'GOL').sum())
+        st.markdown(
+            f"**Ciclo {int(first['ciclo'])} · Giornata {int(first['giornata'])} · {first['orario'] or '--:--'}**"
+            f" — gol totali giornata: {giornata_goals} · GG: {gg_count}"
+        )
+        view = g.drop(columns=['group_key', 'ciclo', 'giornata', 'orario']).rename(columns={
+            'n_match': 'N. match', 'partita': 'Partita', 'risultato': 'Risultato',
+            'gol_totali': 'Gol totali', 'esito': 'Esito'
+        })
+        st.dataframe(view, use_container_width=True, hide_index=True, height=35 * (len(view) + 1) + 3)
+        st.divider()
 
 
 # -------------------------
@@ -1227,7 +1238,7 @@ else:
     )
 
     tab_ov, tab_gg, tab_pat, tab_goals, tab_trend, tab_blocks, tab_teams = st.tabs([
-        'Panoramica', 'Storico GG', 'Pattern 2/3/4 GG', 'Gol totali', 'Trend', 'Blocchi', 'Squadre'
+        'Panoramica', 'Storico GG', 'Pattern 3/4 GG', 'Gol totali', 'Trend', 'Blocchi', 'Squadre'
     ])
 
     with tab_ov:
