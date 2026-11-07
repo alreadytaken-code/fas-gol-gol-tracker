@@ -922,7 +922,7 @@ def render_storico_gg_tab(df):
 # -------------------------
 def build_combo_table(hist, k):
     """Per ogni combinazione di k match (su 6): quante giornate complete li hanno avuti tutti GG."""
-    cols = ['pattern', 'volte', 'pct', 'volte_esatte', 'ultima_uscita']
+    cols = ['pattern', 'volte', 'pct', 'ultima_uscita']
     if hist is None or hist.empty:
         return pd.DataFrame(columns=cols), 0
     complete = hist[hist['completa']].reset_index(drop=True)
@@ -935,16 +935,14 @@ def build_combo_table(hist, k):
     for combo in combinations(range(1, MATCHES_PER_BLOCK + 1), k):
         cs = set(combo)
         hits = [i for i, s in enumerate(sets) if cs <= s]
-        exact = sum(1 for s in sets if s == cs)
         rows.append({
             'pattern': '-'.join(str(p) for p in combo),
             'volte': len(hits),
             'pct': round(len(hits) / n * 100, 1),
-            'volte_esatte': exact,
             'ultima_uscita': labels[hits[-1]] if hits else '-',
         })
     tbl = pd.DataFrame(rows).sort_values(
-        ['volte', 'volte_esatte', 'pattern'], ascending=[False, False, True], kind='stable'
+        ['volte', 'pattern'], ascending=[False, True], kind='stable'
     )
     return tbl[cols].reset_index(drop=True), n
 
@@ -957,8 +955,8 @@ def render_pattern_tab(df):
 
     st.caption(
         'Per 2, 3 e 4 GG vedi quali match della giornata (1-6) sono più spesso GG insieme. '
-        '«Volte» conta le giornate in cui quei match sono stati tutti GG (anche con altri GG nella stessa giornata); '
-        '«Volte esatte» solo quelle in cui i GG erano esattamente quei match. Solo giornate complete.'
+        '«Volte» conta le giornate in cui quei match sono stati tutti GG, anche con altri GG nella stessa giornata. '
+        'Solo giornate complete.'
     )
     tabs = st.tabs(['2 GG', '3 GG', '4 GG'])
     for k, tab in zip((2, 3, 4), tabs):
@@ -973,18 +971,16 @@ def render_pattern_tab(df):
 
             best = tbl.head(10)
             fig = go.Figure()
-            fig.add_bar(x=best['pattern'], y=best['volte'], name='Volte (anche con altri GG)', marker_color='#16a34a')
-            fig.add_bar(x=best['pattern'], y=best['volte_esatte'], name='Volte esatte', marker_color='#38bdf8')
+            fig.add_bar(x=best['pattern'], y=best['volte'], name='Volte', marker_color='#16a34a')
             fig.update_layout(
-                barmode='group', height=320, margin=dict(t=10, b=10, l=10, r=10),
-                xaxis_title='Match GG', yaxis_title='Giornate', legend=dict(orientation='h', y=1.12)
+                height=320, margin=dict(t=10, b=10, l=10, r=10),
+                xaxis_title='Match GG', yaxis_title='Giornate', showlegend=False
             )
             fig.update_xaxes(type='category')
             st.plotly_chart(fig, use_container_width=True, key=f'combo_chart_{k}')
 
             shown = tbl.rename(columns={
-                'pattern': 'Match GG', 'volte': 'Volte (anche con altri GG)', 'pct': '% giornate',
-                'volte_esatte': 'Volte esatte (solo questi GG)', 'ultima_uscita': 'Ultima uscita'
+                'pattern': 'Match GG', 'volte': 'Volte', 'pct': '% giornate', 'ultima_uscita': 'Ultima uscita'
             })
             st.dataframe(shown, use_container_width=True, hide_index=True, height=360)
 
