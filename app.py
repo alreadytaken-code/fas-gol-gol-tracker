@@ -1,5 +1,6 @@
 import re
 from datetime import datetime, timedelta, timezone
+from itertools import combinations
 from math import comb
 
 import pandas as pd
@@ -11,7 +12,7 @@ from plotly.subplots import make_subplots
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('VERSIONE CODICE: 2026-10-04 - tabs + storico GG + pattern')
+st.caption('VERSIONE CODICE: 2026-11-07 - pattern 2/3/4 GG + gol totali, senza predict')
 st.caption(
     'Archivio risultati Sisal · giornate 1-22 senza duplicati · blocchi da 6 · '
     'reset giornaliero dopo l\'1:00'
@@ -79,6 +80,60 @@ def infer_gol_gol(result_list):
             if '+ no goal' in result or '+ no gol' in result or result.strip() in ['no goal', 'no gol', 'nogol', 'ng']:
                 return 'NO GOL'
     return 'N/D'
+
+
+SCORE_RE = re.compile(r'^\s*(\d{1,2})\s*[-:–]\s*(\d{1,2})\s*$')
+TOTAL_GOALS_MARKETS = ('somma gol', 'totale gol', 'gol totali', 'numero gol', 'numero di gol', 'tot. gol')
+
+
+def _parse_score(text):
+    m = SCORE_RE.match(str(text or ''))
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def extract_goals(ev, result_list):
+    """Cerca punteggio finale o gol totali nell'evento. Ritorna (casa, trasferta, totale), None se assenti."""
+    def walk(obj, depth=0):
+        if depth > 3:
+            return None
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                key = str(k).lower()
+                if key == 'risultatoscommessaufficialelist':
+                    continue
+                if isinstance(v, str):
+                    if any(t in key for t in ('risultato', 'punteggio', 'score', 'finale')) \
+                            and not any(t in key for t in ('data', 'ora')):
+                        sc = _parse_score(v)
+                        if sc:
+                            return sc
+                elif isinstance(v, (dict, list)):
+                    found = walk(v, depth + 1)
+                    if found:
+                        return found
+        elif isinstance(obj, list):
+            for item in obj:
+                found = walk(item, depth + 1)
+                if found:
+                    return found
+        return None
+
+    sc = walk(ev)
+    if sc:
+        return sc[0], sc[1], sc[0] + sc[1]
+    for rr in result_list:
+        market = str(rr.get('descrizioneScommessa') or rr.get('modelloScommessa') or '').lower()
+        result = str(rr.get('risultato') or rr.get('descrizioneEsito') or '').strip()
+        if 'esatto' in market or 'risultato finale' in market:
+            sc = _parse_score(result)
+            if sc:
+                return sc[0], sc[1], sc[0] + sc[1]
+        if any(t in market for t in TOTAL_GOALS_MARKETS) and result.isdigit():
+            return None, None, int(result)
+    return None, None, None
+
+
+GOAL_KEYS = ('gol_casa', 'gol_trasferta', 'gol_totali')
 
 
 def get_event_description(ev):
@@ -174,6 +229,12 @@ def fetch_matches():
                         result_list = []
                     esito = infer_gol_gol(result_list)
                     dt_value, orario = parse_datetime_fields(date_str, data_ora)
+                    goals = extract_goals(ev, result_list)
+                    mercati = [
+                        f"{rr.get('descrizioneScommessa') or rr.get('modelloScommessa')} = "
+                        f"{rr.get('risultato') or rr.get('descrizioneEsito')}"
+                        for rr in result_list[:8] if isinstance(rr, dict)
+                    ]
 
                     matches.append({
                         'match_id': f'{date_str}-{codice_palinsesto}-{codice_avvenimento}',
@@ -188,6 +249,11 @@ def fetch_matches():
                         'home_team': home_team,
                         'away_team': away_team,
                         'esito': esito,
+                        'gol_casa': goals[0],
+                        'gol_trasferta': goals[1],
+                        'gol_totali': goals[2],
+                        'mercati': mercati,
+                        'ev_keys': sorted(str(k) for k in ev.keys()),
                     })
 
     dedup = {}
@@ -198,8 +264,12 @@ def fetch_matches():
         else:
             current_score = (pd.notna(current['timestamp']), current['esito'] != 'N/D')
             new_score = (pd.notna(m['timestamp']), m['esito'] != 'N/D')
-            if new_score >= current_score:
-                dedup[m['match_id']] = m
+            best, other = (m, current) if new_score >= current_score else (current, m)
+            for gk in GOAL_KEYS:
+                if best.get(gk) is None and other.get(gk) is not None:
+                    best[gk] = other[gk]
+            best['mercati'] = sorted(set(best.get('mercati') or []) | set(other.get('mercati') or []))[:40]
+            dedup[m['match_id']] = best
 
     return list(dedup.values()), date_str
 
@@ -224,7 +294,8 @@ def prepare_matches_df(matches):
     required = [
         'match_id', 'api_day', 'timestamp', 'timestamp_str', 'orario', 'giornata',
         'codice_palinsesto', 'codice_avvenimento', 'descrizione_avventimento',
-        'home_team', 'away_team', 'esito'
+        'home_team', 'away_team', 'esito',
+        'gol_casa', 'gol_trasferta', 'gol_totali', 'mercati', 'ev_keys'
     ]
     for col in required:
         if col not in df.columns:
@@ -726,211 +797,6 @@ def team_stats_table(history_df):
     return out.sort_values(['btts_rate', 'scored_rate', 'team'], ascending=[False, False, True]).reset_index(drop=True)
 
 # -------------------------
-# Predict Top-N
-# -------------------------
-def team_recent_form(df, team_code, max_matchdays=10):
-    valid_df = ensure_block_columns(get_valid_matches_df(df))
-    if valid_df.empty:
-        return pd.DataFrame(columns=['group_label', 'esito'])
-    subset = valid_df[(valid_df['home_team'] == team_code) | (valid_df['away_team'] == team_code)].copy()
-    if subset.empty:
-        return pd.DataFrame(columns=['group_label', 'esito'])
-    group_order = (
-        subset.groupby('group_key', dropna=False)
-        .agg(last_ts=('sort_timestamp', 'max'), group_label=('group_label', 'first'))
-        .reset_index(drop=True)
-        .sort_values('last_ts', ascending=False, kind='stable')
-    )
-    keep_labels = group_order.head(max_matchdays)['group_label'].tolist()
-    subset = subset[subset['group_label'].isin(keep_labels)].copy()
-    subset = subset.drop_duplicates(subset=['group_label', 'home_team', 'away_team', 'esito'])
-    return subset[['group_label', 'esito']]
-
-
-def rate_from_last_matchdays(team_df, n_days):
-    if team_df.empty:
-        return 0.0, 0
-    ordered_days = []
-    for g in team_df['group_label'].dropna().tolist():
-        if g not in ordered_days:
-            ordered_days.append(g)
-    keep_days = ordered_days[:n_days]
-    subset = team_df[team_df['group_label'].isin(keep_days)].copy()
-    matches = len(subset)
-    if matches == 0:
-        return 0.0, 0
-    gg_rate = float((subset['esito'] == 'GOL').sum() / matches)
-    return gg_rate, matches
-
-
-def get_team_trend_5_10(df, team_code):
-    team_df = team_recent_form(df, team_code, max_matchdays=10)
-    rate_5, matches_5 = rate_from_last_matchdays(team_df, 5)
-    rate_10, matches_10 = rate_from_last_matchdays(team_df, 10)
-    trend_score = (0.6 * rate_5) + (0.4 * rate_10)
-    return {
-        'team': team_code,
-        'rate_5': rate_5,
-        'rate_10': rate_10,
-        'trend_score': trend_score,
-        'matches_5': matches_5,
-        'matches_10': matches_10,
-    }
-
-
-def get_global_trend_score(df):
-    blocks = build_blocks(df)
-    if blocks.empty:
-        return {'rate_5': 0.0, 'rate_10': 0.0, 'trend_score': 0.0}
-    blocks = blocks.copy()
-    blocks['rate'] = blocks['GG'] / blocks['partite']
-
-    def mean_rate(n):
-        subset = blocks.head(n)
-        return float(subset['rate'].mean()) if not subset.empty else 0.0
-
-    rate_5 = mean_rate(5)
-    rate_10 = mean_rate(10)
-    trend_score = (0.6 * rate_5) + (0.4 * rate_10)
-    return {'rate_5': rate_5, 'rate_10': rate_10, 'trend_score': trend_score}
-
-
-def clean_decimal(val):
-    try:
-        val = str(val).replace(',', '.').strip()
-        return float(val)
-    except Exception:
-        return None
-
-
-def implied_probability_from_odds(odds):
-    if odds is None or odds <= 1:
-        return None
-    return 1 / odds
-
-
-def ranking_bonus(home_rank, away_rank):
-    if home_rank is None or away_rank is None:
-        return 0.0
-    diff = abs(home_rank - away_rank)
-    avg_rank = (home_rank + away_rank) / 2
-    bonus = 0.0
-    if diff <= 2:
-        bonus += 0.03
-    elif diff <= 5:
-        bonus += 0.015
-    elif diff >= 12:
-        bonus -= 0.03
-    if avg_rank <= 6:
-        bonus += 0.01
-    if avg_rank >= 14:
-        bonus += 0.005
-    return bonus
-
-
-def parse_text_lines(raw_text):
-    rows = []
-    pattern = re.compile(r'^(.*?)\s+([0-9]+[\.,][0-9]+)\s+([0-9]{1,2})\s+([0-9]{1,2})$')
-    for line in raw_text.splitlines():
-        line = ' '.join(line.strip().split())
-        if not line:
-            continue
-        m = pattern.match(line)
-        if m:
-            match_name = m.group(1)
-            home_team, away_team = split_teams(match_name)
-            rows.append({
-                'match': normalize_match_name(match_name),
-                'home_team': home_team,
-                'away_team': away_team,
-                'quota_gg': clean_decimal(m.group(2)),
-                'rank_home': int(m.group(3)),
-                'rank_away': int(m.group(4)),
-            })
-    return pd.DataFrame(rows)
-
-
-def build_match_scores(input_df, history_df):
-    if input_df.empty:
-        return pd.DataFrame(columns=[
-            'match', 'home_team', 'away_team', 'quota_gg', 'prob_mercato',
-            'home_rate_5', 'home_rate_10', 'away_rate_5', 'away_rate_10',
-            'team_trend_avg', 'global_trend', 'bonus_classifica', 'score_finale'
-        ])
-
-    global_trend = get_global_trend_score(history_df)
-    rows = []
-    for _, r in input_df.iterrows():
-        home_trend = get_team_trend_5_10(history_df, r['home_team'])
-        away_trend = get_team_trend_5_10(history_df, r['away_team'])
-        prob_mercato = implied_probability_from_odds(r['quota_gg']) or 0.0
-        team_trend_avg = (home_trend['trend_score'] + away_trend['trend_score']) / 2
-        bonus_classifica = ranking_bonus(r['rank_home'], r['rank_away'])
-
-        score_finale = (
-            (0.50 * team_trend_avg) +
-            (0.25 * global_trend['trend_score']) +
-            (0.20 * prob_mercato) +
-            (0.05 * bonus_classifica)
-        )
-        score_finale = max(0.0, min(0.95, score_finale))
-
-        rows.append({
-            'match': r['match'],
-            'home_team': r['home_team'],
-            'away_team': r['away_team'],
-            'quota_gg': r['quota_gg'],
-            'prob_mercato': prob_mercato,
-            'home_rate_5': home_trend['rate_5'],
-            'home_rate_10': home_trend['rate_10'],
-            'away_rate_5': away_trend['rate_5'],
-            'away_rate_10': away_trend['rate_10'],
-            'team_trend_avg': team_trend_avg,
-            'global_trend': global_trend['trend_score'],
-            'bonus_classifica': bonus_classifica,
-            'score_finale': score_finale,
-            'home_matches_5': home_trend['matches_5'],
-            'home_matches_10': home_trend['matches_10'],
-            'away_matches_5': away_trend['matches_5'],
-            'away_matches_10': away_trend['matches_10'],
-        })
-
-    return pd.DataFrame(rows).sort_values('score_finale', ascending=False).reset_index(drop=True)
-
-
-def assign_topn_predictions(score_df):
-    if score_df.empty:
-        return score_df.copy(), 0.0, 0
-    out = score_df.copy()
-    expected_gg_total = float(out['score_finale'].sum())
-    gg_slots = max(0, min(len(out), int(round(expected_gg_total))))
-    out['prediction'] = 'NG'
-    if gg_slots > 0:
-        out.loc[:gg_slots - 1, 'prediction'] = 'GG'
-    return out, round(expected_gg_total, 2), gg_slots
-
-
-def build_manual_summary(pred_df, expected_gg_total, gg_slots):
-    if pred_df.empty:
-        return {
-            'matches_count': 0,
-            'expected_gg_total': 0.0,
-            'expected_gg_rounded': 0,
-            'predicted_gg_count': 0,
-            'predicted_ng_count': 0,
-        }
-    predicted_gg_count = int((pred_df['prediction'] == 'GG').sum())
-    predicted_ng_count = int((pred_df['prediction'] == 'NG').sum())
-    return {
-        'matches_count': int(len(pred_df)),
-        'expected_gg_total': round(expected_gg_total, 2),
-        'expected_gg_rounded': int(gg_slots),
-        'predicted_gg_count': predicted_gg_count,
-        'predicted_ng_count': predicted_ng_count,
-    }
-
-
-# -------------------------
 # Storico GG cronologico + pattern
 # -------------------------
 def build_gg_history(df):
@@ -1143,6 +1009,182 @@ def render_storico_gg_tab(df):
 
 
 # -------------------------
+# Pattern 2/3/4 GG + gol totali per partita
+# -------------------------
+def build_combo_table(hist, k):
+    """Per ogni combinazione di k match (su 6): quante giornate complete li hanno avuti tutti GG."""
+    cols = ['pattern', 'volte', 'pct', 'volte_esatte', 'ultima_uscita']
+    if hist is None or hist.empty:
+        return pd.DataFrame(columns=cols), 0
+    complete = hist[hist['completa']].reset_index(drop=True)
+    n = len(complete)
+    if n == 0:
+        return pd.DataFrame(columns=cols), 0
+    sets = [set(p) for p in complete['positions']]
+    labels = complete['label'].tolist()
+    rows = []
+    for combo in combinations(range(1, MATCHES_PER_BLOCK + 1), k):
+        cs = set(combo)
+        hits = [i for i, s in enumerate(sets) if cs <= s]
+        exact = sum(1 for s in sets if s == cs)
+        rows.append({
+            'pattern': '-'.join(str(p) for p in combo),
+            'volte': len(hits),
+            'pct': round(len(hits) / n * 100, 1),
+            'volte_esatte': exact,
+            'ultima_uscita': labels[hits[-1]] if hits else '-',
+        })
+    tbl = pd.DataFrame(rows).sort_values(
+        ['volte', 'volte_esatte', 'pattern'], ascending=[False, False, True], kind='stable'
+    )
+    return tbl[cols].reset_index(drop=True), n
+
+
+def render_pattern_tab(df):
+    hist = build_gg_history(df)
+    if hist.empty or not hist['completa'].any():
+        st.info('Servono giornate complete (6 match) per calcolare i pattern.')
+        return
+
+    st.caption(
+        'Per ogni numero di GG (2, 3, 4) vedi quali match della giornata (1-6) sono più spesso GG insieme. '
+        '«Volte» conta le giornate in cui quei match sono stati tutti GG (anche con altri GG nella stessa giornata); '
+        '«Volte esatte» solo quelle in cui i GG erano esattamente quei match. Solo giornate complete.'
+    )
+    tabs = st.tabs(['2 GG', '3 GG', '4 GG'])
+    for k, tab in zip((2, 3, 4), tabs):
+        with tab:
+            tbl, n = build_combo_table(hist, k)
+            top = tbl.iloc[0]
+            c1, c2, c3 = st.columns(3)
+            c1.metric(f'Combinazione più frequente ({k} GG)', top['pattern'])
+            c2.metric('Uscite', f"{int(top['volte'])} su {n}")
+            c3.metric('Frequenza', f"{top['pct']:.1f}%")
+            st.caption(f"{pattern_to_text(top['pattern'])} · ultima uscita {top['ultima_uscita']}")
+
+            best = tbl.head(10)
+            fig = go.Figure()
+            fig.add_bar(x=best['pattern'], y=best['volte'], name='Volte (anche con altri GG)', marker_color='#16a34a')
+            fig.add_bar(x=best['pattern'], y=best['volte_esatte'], name='Volte esatte', marker_color='#38bdf8')
+            fig.update_layout(
+                barmode='group', height=320, margin=dict(t=10, b=10, l=10, r=10),
+                xaxis_title='Match GG', yaxis_title='Giornate', legend=dict(orientation='h', y=1.12)
+            )
+            fig.update_xaxes(type='category')
+            st.plotly_chart(fig, use_container_width=True, key=f'combo_chart_{k}')
+
+            shown = tbl.rename(columns={
+                'pattern': 'Match GG', 'volte': 'Volte (anche con altri GG)', 'pct': '% giornate',
+                'volte_esatte': 'Volte esatte (solo questi GG)', 'ultima_uscita': 'Ultima uscita'
+            })
+            st.dataframe(shown, use_container_width=True, hide_index=True, height=360)
+
+
+def build_goals_table(df):
+    cols = ['ciclo', 'giornata', 'orario', 'n_match', 'partita', 'risultato', 'gol_totali', 'esito', 'group_key']
+    base = ensure_block_columns(df)
+    if base.empty:
+        return pd.DataFrame(columns=cols)
+    work = base.copy()
+    for c in ('gol_casa', 'gol_trasferta', 'gol_totali'):
+        if c not in work.columns:
+            work[c] = pd.NA
+        work[c] = pd.to_numeric(work[c], errors='coerce')
+    work['gol_totali'] = work['gol_totali'].fillna(work['gol_casa'] + work['gol_trasferta'])
+    work = work.sort_values(['sort_timestamp', 'match_nel_blocco'], ascending=[False, True], kind='stable')
+
+    def score_text(r):
+        if pd.notna(r['gol_casa']) and pd.notna(r['gol_trasferta']):
+            return f"{int(r['gol_casa'])}-{int(r['gol_trasferta'])}"
+        return '-'
+
+    out = pd.DataFrame({
+        'ciclo': work['cycle_id'].astype(int),
+        'giornata': work['giornata'].astype(int),
+        'orario': work['orario'].fillna('').astype(str).str[:5],
+        'n_match': work['match_nel_blocco'].astype(int),
+        'partita': work['descrizione_avventimento'],
+        'risultato': work.apply(score_text, axis=1),
+        'gol_totali': work['gol_totali'].round().astype('Int64'),
+        'esito': work['esito'],
+        'group_key': work['group_key'],
+    })
+    return out.reset_index(drop=True)[cols]
+
+
+def render_goals_diagnostics(df):
+    with st.expander('Diagnostica dati API', expanded=True):
+        has_keys = 'ev_keys' in df.columns and df['ev_keys'].apply(lambda x: isinstance(x, list)).any()
+        if not has_keys:
+            st.caption("Questi dati sono stati caricati con una versione precedente: premi 'Aggiorna risultati' per ricaricarli.")
+            return
+        keys = sorted({k for ks in df['ev_keys'] if isinstance(ks, list) for k in ks})
+        st.markdown('**Campi dell\'evento restituiti dall\'API**')
+        st.code(', '.join(keys) if keys else '(nessuno)')
+        markets = {}
+        if 'mercati' in df.columns:
+            for ms in df['mercati']:
+                if not isinstance(ms, list):
+                    continue
+                for item in ms:
+                    name, _, res = str(item).partition(' = ')
+                    entry = markets.setdefault(name, {'n': 0, 'esempio': res})
+                    entry['n'] += 1
+        if markets:
+            st.markdown('**Mercati con risultato ufficiale trovati**')
+            st.dataframe(
+                pd.DataFrame([{'mercato': k, 'occorrenze': v['n'], 'esempio risultato': v['esempio']} for k, v in markets.items()])
+                .sort_values('occorrenze', ascending=False),
+                use_container_width=True, hide_index=True
+            )
+
+
+def render_gol_totali_tab(df):
+    tbl = build_goals_table(df)
+    if tbl.empty:
+        st.info('Nessun dato disponibile.')
+        return
+
+    known = tbl[tbl['gol_totali'].notna()]
+    if known.empty:
+        st.warning(
+            "Non trovo i gol totali nei dati restituiti dall'API (o il formato non è stato riconosciuto). "
+            'Qui sotto trovi cosa arriva davvero dall’API.'
+        )
+        render_goals_diagnostics(df)
+        return
+
+    totals = known['gol_totali'].astype(int)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric('Partite con gol noti', f'{len(known)} su {len(tbl)}')
+    m2.metric('Media gol a partita', f'{totals.mean():.2f}')
+    m3.metric('Over 2.5', f'{(totals >= 3).mean():.0%}')
+    m4.metric('Massimo gol in una partita', int(totals.max()))
+
+    inconsistent = int(((known['esito'] == 'GOL') & (totals < 2)).sum())
+    if inconsistent:
+        st.warning(f'{inconsistent} partite risultano GG ma con meno di 2 gol totali: controlla il riconoscimento del punteggio.')
+
+    dist = totals.clip(upper=7).value_counts().reindex(range(8), fill_value=0)
+    figd = go.Figure(go.Bar(
+        x=[str(i) if i < 7 else '7+' for i in dist.index], y=dist.values, marker_color='#38bdf8',
+        text=dist.values, textposition='outside', hovertemplate='%{x} gol<br>%{y} partite<extra></extra>'
+    ))
+    figd.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10), xaxis_title='Gol totali nella partita', yaxis_title='Partite')
+    st.plotly_chart(figd, use_container_width=True, key='goals_dist')
+
+    window = st.radio('Giornate mostrate', ['Ultime 5', 'Ultime 20', 'Tutte'], index=1, horizontal=True, key='goals_window')
+    keys = tbl['group_key'].drop_duplicates().tolist()
+    if window != 'Tutte':
+        keys = keys[:int(window.split()[1])]
+    shown = tbl[tbl['group_key'].isin(keys)].drop(columns=['group_key']).rename(columns={
+        'n_match': 'N. match', 'partita': 'Partita', 'risultato': 'Risultato', 'gol_totali': 'Gol totali',
+        'ciclo': 'Ciclo', 'giornata': 'Giornata', 'orario': 'Orario', 'esito': 'Esito'
+    })
+    st.dataframe(shown, use_container_width=True, hide_index=True, height=480)
+
+
+# -------------------------
 # UI STORICO PRINCIPALE
 # -------------------------
 if 'active_data_day' not in st.session_state:
@@ -1177,7 +1219,6 @@ if df.empty:
         f"Giorno dati attivo: {st.session_state.get('active_data_day')} | "
         f"Data API usata: {api_day_used}"
     )
-    (tab_predict,) = st.tabs(['Predict finale'])
 else:
     st.markdown(f'**Ultimo aggiornamento (locale):** {last_update}')
     st.caption(
@@ -1185,8 +1226,8 @@ else:
         f"Data API usata: {api_day_used}"
     )
 
-    tab_ov, tab_gg, tab_trend, tab_blocks, tab_teams, tab_predict = st.tabs([
-        'Panoramica', 'Storico GG', 'Trend', 'Blocchi', 'Squadre', 'Predict finale'
+    tab_ov, tab_gg, tab_pat, tab_goals, tab_trend, tab_blocks, tab_teams = st.tabs([
+        'Panoramica', 'Storico GG', 'Pattern 2/3/4 GG', 'Gol totali', 'Trend', 'Blocchi', 'Squadre'
     ])
 
     with tab_ov:
@@ -1244,6 +1285,12 @@ else:
 
     with tab_gg:
         render_storico_gg_tab(df)
+
+    with tab_pat:
+        render_pattern_tab(df)
+
+    with tab_goals:
+        render_gol_totali_tab(df)
 
     with tab_trend:
         st.subheader('Grafici storico e forecast')
@@ -1382,105 +1429,3 @@ else:
             else:
                 team_view = team_table[team_table['team'] == selected_team].copy()
             st.dataframe(team_view, use_container_width=True, hide_index=True)
-
-
-with tab_predict:
-    st.subheader('Predict finale GG / NG con logica Top-N')
-    st.caption('Formato input: NomePartita quotaGG rankCasa rankTrasferta')
-    st.caption('Esempio: INT ROM 1.97 7 9')
-
-    raw_text = st.text_area(
-        'Inserimento manuale partite',
-        height=220,
-        placeholder='GEN NAP 1.98 10 4\nUDI MIL 1.96 2 12\nINT ROM 1.97 7 9'
-    )
-
-    parsed_df = parse_text_lines(raw_text) if raw_text.strip() else pd.DataFrame(
-        columns=['match', 'home_team', 'away_team', 'quota_gg', 'rank_home', 'rank_away']
-    )
-
-    if not raw_text.strip():
-        st.info('Inserisci le righe manualmente per ottenere la predict finale completa GG / NG.')
-    elif parsed_df.empty:
-        st.error('Nessuna riga riconosciuta. Usa il formato: NomePartita quotaGG rankCasa rankTrasferta')
-    else:
-        score_df = build_match_scores(parsed_df, df)
-        pred_df, expected_gg_total, gg_slots = assign_topn_predictions(score_df)
-        summary = build_manual_summary(pred_df, expected_gg_total, gg_slots)
-        global_trend = get_global_trend_score(df)
-
-        g1, g2, g3, g4 = st.columns(4)
-        g1.metric('Trend globale 5/10 blocchi', f"{global_trend['trend_score']:.1%}")
-        g2.metric('GG attesi totali', summary['expected_gg_total'])
-        g3.metric('Partite previste GG', summary['predicted_gg_count'])
-        g4.metric('Partite previste NG', summary['predicted_ng_count'])
-        st.caption(
-            f"Logica finale: vengono marcate GG le migliori {summary['expected_gg_rounded']} "
-            f"partite del ranking, coerentemente con i GG attesi totali."
-        )
-
-        st.markdown('### Predict completa match per match')
-        predict_list = pred_df[['match', 'prediction', 'score_finale']].copy()
-        predict_list['score_finale'] = (predict_list['score_finale'] * 100).round(2)
-        predict_list.columns = ['Match', 'Previsione', 'Score %']
-        st.dataframe(predict_list, use_container_width=True, hide_index=True)
-
-        st.markdown('### Elenco secco finale')
-        gg_list = pred_df[pred_df['prediction'] == 'GG']['match'].tolist()
-        ng_list = pred_df[pred_df['prediction'] == 'NG']['match'].tolist()
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown('#### Match previsti GG')
-            if gg_list:
-                for m in gg_list:
-                    st.write(f'- {m}')
-            else:
-                st.write('Nessun match previsto GG')
-        with c2:
-            st.markdown('#### Match previsti NG')
-            if ng_list:
-                for m in ng_list:
-                    st.write(f'- {m}')
-            else:
-                st.write('Nessun match previsto NG')
-
-        st.markdown('### Tabella tecnica completa')
-        display_df = pred_df.copy()
-        for col in [
-            'prob_mercato', 'home_rate_5', 'home_rate_10',
-            'away_rate_5', 'away_rate_10', 'team_trend_avg',
-            'global_trend', 'bonus_classifica', 'score_finale'
-        ]:
-            display_df[col] = (display_df[col] * 100).round(2)
-        display_df.columns = [
-            'Match', 'Team casa', 'Team trasferta', 'Quota GG', 'Prob. mercato %',
-            'Casa rate 5g %', 'Casa rate 10g %', 'Trasferta rate 5g %', 'Trasferta rate 10g %',
-            'Trend medio match %', 'Trend globale %', 'Bonus classifica %',
-            'Score finale %', 'Previsione',
-            'Casa match 5g', 'Casa match 10g', 'Trasferta match 5g', 'Trasferta match 10g'
-        ]
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-        st.markdown('### Grafici predict')
-        pcol1, pcol2 = st.columns(2)
-        with pcol1:
-            chart_df = pred_df.set_index('match')[['score_finale']]
-            st.bar_chart(chart_df, height=320)
-        with pcol2:
-            pred_counts = pred_df.groupby('prediction').size().reset_index(name='count')
-            if not pred_counts.empty:
-                st.bar_chart(pred_counts.set_index('prediction')[['count']], height=320)
-            else:
-                st.info('Nessuna predict disponibile.')
-
-        with st.expander('Formula predict usata', expanded=False):
-            st.write('Forecast generale prossimo blocco: 50% ultimi 5 blocchi + 30% ultimi 10 blocchi + 20% ultimi 20 blocchi.')
-            st.write('I blocchi mantengono la giornata Sisal originale da 1 a 22.')
-            st.write('Se la sequenza 1-22 riparte, viene creato un nuovo ciclo distinto per evitare di fondere due giornate omonime.')
-            st.write('Deduplica applicata solo sui match identici, non sulle giornate omonime di cicli diversi.')
-            st.write('Trend squadra = 60% rate ultime 5 giornate/blocchi + 40% rate ultime 10 giornate/blocchi.')
-            st.write('Trend match = media trend squadra casa e trasferta.')
-            st.write('Score finale = 50% trend match + 25% trend globale + 20% probabilità mercato + 5% bonus classifica.')
-            st.write('GG attesi totali = somma degli score finali delle partite inserite.')
-            st.write('Predict finale = Top-N del ranking, dove N è il numero arrotondato di GG attesi totali.')
