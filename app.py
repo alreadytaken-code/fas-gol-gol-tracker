@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 st.set_page_config(page_title='FAS League Tracker', layout='wide')
 
 st.title('FAS League Tracker')
-st.caption('VERSIONE CODICE: 2026-11-07 - pattern 3/4 GG + gol totali per giornata')
+st.caption('VERSIONE CODICE: 2026-11-07 - tab Panoramica / Storico GG (con squadre) / Pattern / Gol totali')
 st.caption(
     'Archivio risultati Sisal · giornate 1-22 senza duplicati · blocchi da 6 · '
     'reset giornaliero dopo l\'1:00'
@@ -1237,8 +1237,8 @@ else:
         f"Data API usata: {api_day_used}"
     )
 
-    tab_ov, tab_gg, tab_pat, tab_goals, tab_trend, tab_blocks, tab_teams = st.tabs([
-        'Panoramica', 'Storico GG', 'Pattern 3/4 GG', 'Gol totali', 'Trend', 'Blocchi', 'Squadre'
+    tab_ov, tab_gg, tab_pat, tab_goals = st.tabs([
+        'Panoramica', 'Storico GG', 'Pattern 3/4 GG', 'Gol totali'
     ])
 
     with tab_ov:
@@ -1297,136 +1297,7 @@ else:
     with tab_gg:
         render_storico_gg_tab(df)
 
-    with tab_pat:
-        render_pattern_tab(df)
-
-    with tab_goals:
-        render_gol_totali_tab(df)
-
-    with tab_trend:
-        st.subheader('Grafici storico e forecast')
-        trend_chart_df = build_trend_visual_df(df)
-        trend_chart_view = trend_chart_df.copy()
-        trend_status = build_trend_status(df)
-        forecast_compare_df = build_forecast_compare_df(df)
-        heatmap_df = build_heatmap_pivot(df)
-
-        t1, t2, t3, t4 = st.columns(4)
-        t1.metric('Stato trend', trend_status['label'])
-        t2.metric('Delta MA3 vs MA5', trend_status['delta_short_vs_long'])
-        t3.metric('Momento 4+ GG', trend_status['momentum'])
-        t4.metric('Stress <=2 GG', trend_status['stress'])
-        st.caption(
-            f"Ultimo blocco: {trend_status['last_gg']} GG ({trend_status['last_pct']:.1f}%) | "
-            f"Scostamento vs MA5: {trend_status['last_vs_ma5']}"
-        )
-
-        st.markdown('#### GG per blocco con medie mobili')
-        if not trend_chart_view.empty:
-            gg_chart = trend_chart_view[['label_chart', 'GG', 'gg_ma_3', 'gg_ma_5']].copy()
-            gg_chart['GG <=2'] = gg_chart['GG'].apply(lambda x: x if x <= 2 else None)
-            gg_chart['GG =3'] = gg_chart['GG'].apply(lambda x: x if x == 3 else None)
-            gg_chart['GG >3'] = gg_chart['GG'].apply(lambda x: x if x > 3 else None)
-
-            fig = go.Figure()
-            fig.add_bar(x=gg_chart['label_chart'], y=gg_chart['GG <=2'], name='GG <=2', marker_color='#dc2626')
-            fig.add_bar(x=gg_chart['label_chart'], y=gg_chart['GG =3'], name='GG =3', marker_color='#eab308')
-            fig.add_bar(x=gg_chart['label_chart'], y=gg_chart['GG >3'], name='GG >3', marker_color='#16a34a')
-            fig.add_scatter(x=gg_chart['label_chart'], y=gg_chart['gg_ma_3'], mode='lines', name='gg_ma_3', line=dict(color='#7dd3fc', width=2))
-            fig.add_scatter(x=gg_chart['label_chart'], y=gg_chart['gg_ma_5'], mode='lines', name='gg_ma_5', line=dict(color='#38bdf8', width=3))
-            fig.update_layout(barmode='overlay', height=520, xaxis_title='Giornata + orario', yaxis_title='GG', legend_title='Serie')
-            fig.update_xaxes(type='category', categoryorder='array', categoryarray=gg_chart['label_chart'].tolist())
-            fig.update_yaxes(range=[0, 6], dtick=1)
-            fig.update_xaxes(tickangle=-90)
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption('Asse Y fisso 0-6. Etichette solo Giornata + orario. Colori: rosso <=2, giallo =3, verde >3.')
-        else:
-            st.info('Nessun dato disponibile.')
-
-        st.markdown('#### Percentuale GG per blocco con smoothing')
-        if not trend_chart_view.empty:
-            pct_chart = trend_chart_view[['label_chart', '% sul totale', 'pct_ma_3', 'pct_ma_5']].copy().set_index('label_chart')
-            st.line_chart(pct_chart[['% sul totale', 'pct_ma_3', 'pct_ma_5']], height=420, use_container_width=True)
-            st.caption('Vista completa. La linea % sul totale mostra la qualità del blocco: sopra 50% sei in equilibrio positivo, sopra 60% hai spinta forte.')
-        else:
-            st.info('Nessun dato disponibile.')
-
-        cfa, cfb = st.columns(2)
-        with cfa:
-            st.markdown('#### Confronto rapido forecast')
-            if not forecast_compare_df.empty:
-                st.bar_chart(forecast_compare_df.set_index('metrica')[['valore']], height=320, use_container_width=True)
-            else:
-                st.info('Nessun dato disponibile.')
-        with cfb:
-            st.markdown('#### Heatmap GG per ciclo/giornata')
-            if not heatmap_df.empty:
-                st.dataframe(heatmap_df, use_container_width=True)
-                st.caption('Lettura heatmap: valori più alti = più GG in quella giornata del ciclo.')
-            else:
-                st.info('Nessun dato disponibile.')
-
-        st.markdown('#### Tabella orario e GG per giornata')
-        orario_gg_df = build_orario_gg_table(df)
-        if not orario_gg_df.empty:
-            st.dataframe(orario_gg_df, use_container_width=True, hide_index=True)
-            st.caption("Questa tabella mostra per ogni giornata l'orario del blocco e quanti GG sono usciti in quel blocco.")
-        else:
-            st.info('Nessun dato disponibile.')
-
-    with tab_blocks:
-        st.subheader('Partite giorno per giorno')
-        storico_df = ensure_block_columns(df)[[
-            'cycle_id', 'giornata', 'group_label', 'match_nel_blocco', 'orario',
-            'codice_avvenimento', 'descrizione_avventimento', 'esito', 'group_key', 'sort_timestamp'
-        ]].copy()
-
-        block_order = (
-            storico_df.groupby('group_key', dropna=False)
-            .agg(last_ts=('sort_timestamp', 'max'), group_label=('group_label', 'first'))
-            .reset_index(drop=True)
-            .sort_values('last_ts', ascending=False, kind='stable')
-        )
-        ordered_labels = block_order['group_label'].tolist()
-
-        if ordered_labels:
-            for label in ordered_labels:
-                blocco_g = storico_df[storico_df['group_label'] == label].copy()
-                blocco_g = blocco_g.sort_values(['match_nel_blocco', 'orario', 'codice_avvenimento'], ascending=[True, True, True], kind='stable').reset_index(drop=True)
-                gg_count = int((blocco_g['esito'] == 'GOL').sum())
-                ng_count = int((blocco_g['esito'] == 'NO GOL').sum())
-                giornata_value = int(blocco_g['giornata'].iloc[0]) if not blocco_g.empty else 0
-                ciclo_value = int(blocco_g['cycle_id'].iloc[0]) if not blocco_g.empty else 0
-                with st.expander(
-                    f'Giornata {giornata_value} · Ciclo {ciclo_value} · Partite {len(blocco_g)} · GG {gg_count} · NG {ng_count}',
-                    expanded=False
-                ):
-                    st.dataframe(
-                        blocco_g[['match_nel_blocco', 'orario', 'giornata', 'codice_avvenimento', 'descrizione_avventimento', 'esito']].rename(columns={'match_nel_blocco': 'n_match'}),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-        else:
-            st.info('Nessun blocco disponibile.')
-
-        st.subheader('Blocchi con 6 GG su 6')
-        all_gg_stats = build_all_gg_stats(df)
-        col4, col5 = st.columns(2)
-        col4.metric('Totale blocchi 6 su 6', all_gg_stats['total_all_gg_blocks'])
-        col5.metric('Serie aperta 6 su 6', all_gg_stats['latest_streak'])
-
-        perfect_rows = build_blocks(df)
-        perfect_rows = perfect_rows[(perfect_rows['partite'] >= MATCHES_PER_BLOCK) & (perfect_rows['GG'] == MATCHES_PER_BLOCK)].copy()
-        if perfect_rows.empty:
-            st.caption('Nessun blocco perfetto 6 GG su 6 per ora.')
-        else:
-            for _, row in perfect_rows.iterrows():
-                st.success(f"{row['group_label']} · 6 GG su 6 · ore {row['orario_inizio']}")
-
-        st.subheader('Blocchi Sisal distinti')
-        st.dataframe(build_blocks(df), use_container_width=True, hide_index=True)
-
-    with tab_teams:
+        st.divider()
         st.subheader('Statistiche per squadra')
         st.caption('Gol fatti/subiti, media gol, % segna, % subisce, % GG, clean sheet e no score sullo storico disponibile.')
         team_table = team_stats_table(df)
@@ -1440,3 +1311,9 @@ else:
             else:
                 team_view = team_table[team_table['team'] == selected_team].copy()
             st.dataframe(team_view, use_container_width=True, hide_index=True)
+
+    with tab_pat:
+        render_pattern_tab(df)
+
+    with tab_goals:
+        render_gol_totali_tab(df)
